@@ -3,76 +3,94 @@
 ### How to run an autonomous AI-agent development team
 
 > Real patterns from shipping a production app with zero human code.
-> 30 PRs merged on launch day. No broken deploys.
+> 32 agents. 28 specialized roles. No broken deploys.
 
 ---
 
 ## What This Is
 
-We built [viral](https://github.com/SylphxAI/viral) — a production Next.js app — using fully autonomous AI agents. Not copilot autocomplete. Six specialized agents that discover issues, triage them, write code, review each other, merge, and monitor production health.
+We built [viral](https://github.com/SylphxAI/viral) — a production Next.js app — using fully autonomous AI agents. Not copilot autocomplete. A fleet of specialized agents that discover issues, write code, review each other, merge, and monitor production health.
 
 **This playbook is the operating manual.** Every recommendation comes from a real incident, a real config, or a real production failure. We include actual YAML, actual error messages, and actual war stories.
 
-## Results
+## Current Architecture: V4 (Perpetual Motion)
+
+V4 replaces the sequential pipeline with a **perpetual motion model** — 28 specialized roles across 10 departments, all working in parallel. No pipeline. No state machine. No handoffs. Just Git.
 
 | Metric | Value |
 |--------|-------|
-| PRs merged on launch day | **30** |
-| Batch merge speed | **14 PRs in 2 minutes** |
-| Target throughput | **30 PRs/hour** |
+| Specialized roles | **28** |
+| Agent instances | **32** |
+| Departments | **10** |
+| Pipeline stages | **0** (no pipeline) |
+| State management | **None** (stateless coordinator) |
 | Production downtime | **0** |
 | Human code written | **0 lines** |
 
-## Table of Contents
+### V4 Quick Start
 
-| # | Document | What You'll Learn |
-|---|----------|-------------------|
-| 1 | [Foundation](docs/01-foundation.md) | Kubernetes controller pattern, GitHub as source of truth, why no locks |
-| 2 | [Agent Roles](docs/02-agent-roles.md) | The 6 agents: Scout, Triage, Builder, Reviewer, Merger, Sentinel |
-| 3 | [Merge Safety](docs/03-merge-safety.md) | Why NO major OSS project uses `strict: true` — and what to use instead |
-| 4 | [Coordinator Design](docs/04-coordinator-design.md) | The 11-step reconciliation loop, idempotent by design |
-| 5 | [CI Pipeline](docs/05-ci-pipeline.md) | Minimal required checks, lint as non-blocking, speed over ceremony |
-| 6 | [Migration Strategy](docs/06-migration-strategy.md) | From manual to autonomous: v1 → v2 → v3 |
-| 7 | [Lessons Learned](docs/07-lessons-learned.md) | 15+ real failures and how to prevent them |
-| 8 | [Tooling](docs/08-tooling.md) | GitHub Apps, cron scheduling, label schema |
-| 9 | [KPI & Metrics](docs/09-kpi-metrics.md) | What to measure, target ranges, our launch day numbers |
-| 10 | [Open Source Research](docs/10-open-source-research.md) | How Kubernetes, React, Rust, and GitHub handle high-volume merging |
-
-## Quick Start
-
-Setting up a new project for AI-agent development? Read in this order:
-
-1. **[Foundation](docs/01-foundation.md)** — The architecture. Understand the Kubernetes controller pattern before anything else.
-2. **[Agent Roles](docs/02-agent-roles.md)** — The six agents and why Triage is the most important one.
-3. **[Merge Safety](docs/03-merge-safety.md)** — Branch protection settings that actually work at scale.
-4. **[Lessons Learned](docs/07-lessons-learned.md)** — Every mistake we made so you don't have to.
-5. **[KPI & Metrics](docs/09-kpi-metrics.md)** — How to know if it's working.
+1. **[V4 Architecture](docs/pipeline-v4-architecture.md)** — The perpetual motion model. Git-first principles, no-waiting design, convergent quality.
+2. **[Agent Roles](docs/agent-roles.md)** — All 28 roles: what they do, what they look for, what they produce.
+3. **[Coordinator Guide](docs/coordinator-guide.md)** — The 5-step reconciliation loop. Roster config, scaling, monitoring.
+4. **[V3 to V4 Migration](docs/v3-to-v4-migration.md)** — What changed, how to switch, what to watch.
 
 ## Key Insights (TL;DR)
 
-- **`strict: true` kills throughput.** No major OSS project uses it at scale. We switched to `strict: false` and went from 20 min/PR to 14 PRs in 2 minutes.
-- **Triage is the #1 missing piece.** Without it, 30-50% of agent work is wasted on low-value issues.
-- **Locks are an anti-pattern.** Use idempotent reconciliation loops (like Kubernetes controllers). Overlapping runs are harmless.
-- **Post-merge monitoring replaces pre-merge serialization.** Sentinel + auto-revert gives you the safety of `strict: true` with 10x the throughput.
-- **GitHub is your database.** Labels are FSM state. Issues are the task queue. PRs are the review pipeline. No external state.
+- **No pipeline beats any pipeline.** V4 eliminated sequential handoffs entirely. All 32 agents work in parallel from minute one.
+- **Specialists beat generalists.** 28 focused roles find deeper issues than 6 generalists ever could.
+- **Git is the only coordination layer.** Issues, PRs, and branches. No labels for state, no FSM, no orchestrator.
+- **The coordinator is a reconciliation loop, not an orchestrator.** It maintains fleet size and merges approved PRs. That's it.
+- **Idle agents exit immediately.** No busywork. If there's nothing to do, the agent is gone in under a minute.
+- **The system self-corrects.** Overlapping work gets caught by Reviewers. Inconsistencies get fixed by Refactorers. Type issues get fixed by Type Hardeners. The codebase converges.
 
 ## Architecture at a Glance
 
 ```
-Scout discovers → Issue created (pipeline/discovered)
-       ↓
-Triage evaluates → Approved or Rejected
-       ↓ (approved)
-Builder implements → PR opened (pipeline/pr-open)
-       ↓
-Reviewer reviews → Approved or Changes Requested
-       ↓ (approved)
-Merger merges → Squash merge to main
-       ↓
-Sentinel verifies → Production healthy or auto-revert
+┌─────────────────────────────────────────────────────────────┐
+│                    COORDINATOR (cron, every 5 min)           │
+│  Inventory → Spawn deficits → Merge approved → Health check │
+└─────────────────────────────────────────────────────────────┘
+        ↕                ↕                ↕
+┌───────────────────────────────────────────────────────────────┐
+│                     AGENT FLEET (32 instances)                │
+│  Product (3) · Engineering (6) · Quality (3) · Security (2)  │
+│  Performance (2) · Code Health (4) · Maintenance (2)         │
+│  Standards (5) · Infrastructure (1) · Gates (4)              │
+└───────────────────────────────────────────────────────────────┘
+        ↕                ↕                ↕
+┌───────────────────────────────────────────────────────────────┐
+│              GITHUB (Single Source of Truth)                   │
+│         Issues · Pull Requests · main branch                  │
+└───────────────────────────────────────────────────────────────┘
 ```
 
-All coordinated by a single reconciliation loop running every 5 minutes. No locks. No webhooks. Just polling + idempotent operations.
+All coordinated by a stateless reconciliation loop running every 5 minutes. No locks. No webhooks. No state. Just polling + idempotent operations.
+
+## Table of Contents
+
+### V4 Documentation (Current)
+
+| # | Document | What You'll Learn |
+|---|----------|-------------------|
+| — | [V4 Architecture](docs/pipeline-v4-architecture.md) | Perpetual motion model, git-first principles, no-waiting design |
+| — | [Agent Roles](docs/agent-roles.md) | All 28 roles across 10 departments with full specifications |
+| — | [Coordinator Guide](docs/coordinator-guide.md) | Reconciliation algorithm, roster config, scaling, monitoring |
+| — | [V3 → V4 Migration](docs/v3-to-v4-migration.md) | What changed, key differences, migration steps |
+
+### V3 Documentation (Historical)
+
+| # | Document | What You'll Learn |
+|---|----------|-------------------|
+| 1 | [Foundation](docs/01-foundation.md) | Kubernetes controller pattern, GitHub as source of truth |
+| 2 | [Agent Roles (V3)](docs/02-agent-roles.md) | The original 6 agents: Scout, Triage, Builder, Reviewer, Merger, Sentinel |
+| 3 | [Merge Safety](docs/03-merge-safety.md) | Why NO major OSS project uses `strict: true` — and what to use instead |
+| 4 | [Coordinator Design (V3)](docs/04-coordinator-design.md) | The 11-step reconciliation loop |
+| 5 | [CI Pipeline](docs/05-ci-pipeline.md) | Minimal required checks, lint as non-blocking, speed over ceremony |
+| 6 | [Migration Strategy](docs/06-migration-strategy.md) | From manual to autonomous: v1 → v2 → v3 |
+| 7 | [Lessons Learned](docs/07-lessons-learned.md) | 15+ real failures and how to prevent them |
+| 8 | [Tooling](docs/08-tooling.md) | GitHub Apps, cron scheduling, label schema |
+| 9 | [KPI & Metrics](docs/09-kpi-metrics.md) | What to measure, target ranges, launch day numbers |
+| 10 | [Open Source Research](docs/10-open-source-research.md) | How Kubernetes, React, Rust, and GitHub handle high-volume merging |
 
 ## Research Foundation
 
