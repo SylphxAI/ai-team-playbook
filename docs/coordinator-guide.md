@@ -9,7 +9,7 @@ Runs every 5 minutes. Stateless, idempotent.
 ```
 1. INVENTORY     — sessions_list, count active agents by v4-* label prefix
 2. SPAWN DEFICIT — for each role, if running < desired, sessions_spawn the difference
-3. HEALTH CHECK  — curl -s -o /dev/null -w "%{http_code}" https://tryit.fun
+3. HEALTH CHECK  — curl -s -o /dev/null -w "%{http_code}" <PRODUCTION_URL>
                    if not 200 → spawn one-off revert agent (label: v4-revert)
 4. SUMMARY       — print agents running/desired, health status, any spawn failures
 ```
@@ -45,13 +45,17 @@ Four steps. No merging, no code review, no work assignment.
 
 For each role with `running < desired`, call `sessions_spawn` with:
 - **Label**: `v4-{key}` (e.g., `v4-builder`)
-- **Task**: Shared product context + role brief
+- **Task**: Project context + role brief
 
-The product context is prepended to every agent's task, giving all agents identical understanding of users, competitors, and product direction.
+Every agent's task has two parts:
+1. **Project context** (configured per-project) — project name, URL, competitors, repo, commit identity, PR conventions
+2. **Role brief** (generic keyword list) — the agent's capability scope from the [agent roles](agent-roles.md)
+
+The project context is prepended to every agent's task, giving all agents identical understanding of the product. The role briefs are generic and project-agnostic.
 
 ## Health Check & Revert
 
-The coordinator runs a simple HTTP check against `https://tryit.fun` every 5 minutes:
+The coordinator runs a simple HTTP check against the production URL every 5 minutes:
 
 - **200** → healthy, continue
 - **Not 200** → spawn a one-off revert agent with label `v4-revert`
@@ -74,8 +78,8 @@ The coordinator doesn't need to understand scaling strategy — just update the 
 ## Prompt Size
 
 The entire coordinator prompt is ~5KB:
-- Product context: ~500 bytes (shared across all agents)
-- 7 role briefs: ~200-400 bytes each
+- Project context: ~500 bytes (configured per-project)
+- 7 role briefs: ~200-400 bytes each (generic keyword lists)
 - Algorithm + roster table: ~1KB
 
 Compact by design. AI reasons better with concise direction than verbose instructions.

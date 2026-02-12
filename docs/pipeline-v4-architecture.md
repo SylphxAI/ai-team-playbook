@@ -8,8 +8,8 @@ Perpetual-motion system. No pipeline. No stages. No state machine. 26 autonomous
 2. **Nobody waits.** All agents work in parallel from minute one. Issues are guidance, not prerequisites.
 3. **AI is fullstack.** Split by cognitive mode, not technical domain.
 4. **Directions, not departments.** 7 directions of thought: product, build, test, improve, secure, perf, review.
-5. **Tell WHAT and WHY, not HOW.** Briefs with guiding questions. AI reasons about approach.
-6. **Shared product context.** Every agent understands users, competitors, and product vision.
+5. **Generic briefs + project context.** Role briefs are project-agnostic keyword lists. Project context is separate.
+6. **Keywords, not narratives.** Minimum words, maximum coverage of all aspects each direction handles.
 
 ## Distribution
 
@@ -31,7 +31,7 @@ The coordinator is a **reconciler with a health check**. It runs every 5 minutes
 ```
 1. INVENTORY     — sessions_list, count active v4-* agents
 2. SPAWN DEFICIT — for each role, if running < desired, spawn the difference
-3. HEALTH CHECK  — curl tryit.fun, if not 200 → spawn one-off v4-revert agent
+3. HEALTH CHECK  — curl production URL, if not 200 → spawn one-off v4-revert agent
 4. SUMMARY       — print agents running/desired, health status
 ```
 
@@ -67,17 +67,28 @@ The system converges naturally:
 
 Every agent prompt has two parts:
 
-### 1. Shared Product Context (~500 bytes)
-All agents receive identical context: what tryit.fun is, who the users are, who the competitors are (Kahoot, Quizlet, BuzzFeed, Typeform), what the market gap is, and where the product is headed. This ensures every agent makes decisions aligned with the product vision.
+### 1. Project Context (~500 bytes, configured per-project)
 
-### 2. Role Brief (~200-400 bytes)
-A brief that gives the agent:
-- **User perspective** — what users expect, what hurts them
-- **Competitor perspective** — what Kahoot/BuzzFeed do (and don't)
-- **Product perspective** — what matters for tryit.fun
-- **Guiding questions** — prompts for reasoning about priorities
+All agents receive identical project context: what the product is, who the users are, who the competitors are, what the market gap is, and where the product is headed. This is configured once per project and prepended to every agent's task.
 
-Briefs deliberately omit step-by-step procedures. AI has thinking ability — give it context and a mission, then let it reason.
+Example fields:
+- Project name, URL, description
+- Competitors and market positioning
+- Repo, commit identity, PR conventions
+- Project-specific constraints
+
+### 2. Role Brief (~200-400 bytes, generic keyword lists)
+
+Each role brief is a set of **keyword clusters** — one bullet per aspect of the role, covering all relevant concerns with minimum words. The briefs are:
+
+- **Generic** — not tied to any specific project
+- **Keyword-based** — scannable clusters, not narrative paragraphs
+- **Comprehensive** — covers ALL aspects the direction handles
+- **Compact** — AI reasons better with concise, dense prompts
+
+See [Agent Roles](agent-roles.md) for the full keyword-based briefs.
+
+The separation means you can swap project context without touching role briefs, or refine a role brief without affecting other projects.
 
 ## Key Metrics
 
@@ -101,5 +112,5 @@ Briefs deliberately omit step-by-step procedures. AI has thinking ability — gi
 | Coordinator | Orchestrator (merge + health + assign) | Reconciler + health check |
 | Merging | Dedicated Merger agent | Review direction (review + merge) |
 | Health checks | Coordinator (complex) | Coordinator (simple HTTP) + one-off revert agent |
-| Agent briefs | Procedural checklists | High-level direction with guiding questions |
-| Product context | Per-agent, inconsistent | Shared block, identical for all |
+| Agent briefs | Procedural checklists | Generic keyword lists |
+| Product context | Per-agent, inconsistent | Shared block, identical for all, separate from briefs |

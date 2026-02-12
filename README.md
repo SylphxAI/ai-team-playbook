@@ -9,7 +9,9 @@
 
 ## What This Is
 
-We built [viral](https://github.com/SylphxAI/viral) — a production Next.js app — using fully autonomous AI agents. Not copilot autocomplete. A fleet of specialized agents that discover issues, write code, review each other, merge, and monitor production health.
+A playbook for running fully autonomous AI agent teams. Not copilot autocomplete — a fleet of specialized agents that discover issues, write code, review each other, merge, and monitor production health.
+
+Originally developed while building [viral](https://github.com/SylphxAI/viral), but the patterns, role briefs, and architecture are **generic** — applicable to any project.
 
 **This playbook is the operating manual.** Every recommendation comes from a real incident, a real config, or a real production failure.
 
@@ -30,23 +32,27 @@ V4 replaces the sequential pipeline with a **perpetual motion model** — 7 dire
 
 | Direction | Agents | What They Do |
 |-----------|--------|--------------|
-| **Product** | 1 | Product vision, feature issues, user journeys, competitive strategy |
-| **Build** | 12 | Fullstack engineering — features, fixes, content, anything that adds value |
+| **Product** | 1 | Product vision, feature issues, competitive strategy, monetization |
+| **Build** | 12 | Fullstack engineering — features, APIs, auth, payments, real-time, infrastructure |
 | **Test** | 5 | Unit (2), Integration (1), E2E (2) — catch real bugs, not pad coverage |
 | **Improve** | 2 | Code quality, refactoring, types, docs, SEO, accessibility, i18n |
-| **Secure** | 1 | Adversarial thinking — XSS, injection, auth bypass, CVEs |
-| **Perf** | 1 | Measurement-based optimization — first paint, bundle size, mobile 3G |
+| **Secure** | 1 | Adversarial thinking — XSS, injection, auth bypass, CVEs, secrets |
+| **Perf** | 1 | Measurement-based optimization — Core Web Vitals, bundles, queries, mobile |
 | **Review** | 4 | Quality gate + merge authority — review, approve, and merge PRs |
 
 ### Prompt Philosophy
 
-Agent briefs are 1-2 sentences with guiding questions, not step-by-step scripts. Every agent gets shared product context — users, competitors (Kahoot, BuzzFeed, Quizlet), product vision. Tell WHAT and WHY, not HOW. AI has thinking ability — give it a mission, then let it reason.
+Agent briefs are **generic keyword lists** — minimum words, maximum coverage. Every agent gets project-specific context prepended separately. This separation means:
+
+- **Role briefs are reusable** across projects — swap the project context, keep the briefs
+- **Keywords, not narratives** — AI parses dense keyword clusters faster than paragraphs
+- **Comprehensive** — each keyword list covers ALL aspects that direction handles
 
 ### V4 Quick Start
 
 1. **[V4 Architecture](docs/pipeline-v4-architecture.md)** — The perpetual motion model. Git-first principles, no-waiting design.
-2. **[Agent Roles](docs/agent-roles.md)** — All 7 directions: what they do, why they're split this way.
-3. **[Coordinator Guide](docs/coordinator-guide.md)** — The reconciliation loop. Roster config, health check, scaling.
+2. **[Agent Roles](docs/agent-roles.md)** — All 7 directions with generic keyword-based role briefs.
+3. **[Coordinator Guide](docs/coordinator-guide.md)** — The 4-step reconciliation loop. Roster config, health check, scaling.
 4. **[V3 to V4 Migration](docs/v3-to-v4-migration.md)** — What changed, how to switch, what to watch.
 
 ## Key Insights (TL;DR)
@@ -56,8 +62,8 @@ Agent briefs are 1-2 sentences with guiding questions, not step-by-step scripts.
 - **Git is the only coordination layer.** Issues, PRs, and branches. No labels for state, no FSM, no orchestrator.
 - **The coordinator is a reconciler, not an orchestrator.** It maintains fleet size and checks production health. That's it.
 - **Reviewers merge.** The agent who reviewed the code is the natural person to merge it. No separate merger.
-- **Tell WHAT and WHY, not HOW.** Agent briefs are guiding questions, not procedures. AI can reason.
-- **Shared product context.** Every agent knows the users, the competitors, and the vision. No blind specialists.
+- **Generic briefs + project context.** Role briefs are keyword lists reusable across any project. Project context is separate.
+- **Keywords beat narratives.** Dense keyword clusters give AI better scope understanding than prose paragraphs.
 - **Idle agents exit immediately.** No busywork. Nothing to do → gone in under a minute.
 - **The system self-corrects.** Overlapping work gets caught by Reviewers. Quality drift gets fixed by Improvers.
 
@@ -88,8 +94,8 @@ Agent briefs are 1-2 sentences with guiding questions, not step-by-step scripts.
 | # | Document | What You'll Learn |
 |---|----------|-------------------|
 | — | [V4 Architecture](docs/pipeline-v4-architecture.md) | Perpetual motion model, git-first principles, no-waiting design |
-| — | [Agent Roles](docs/agent-roles.md) | All 7 directions with role briefs and design rationale |
-| — | [Coordinator Guide](docs/coordinator-guide.md) | Reconciliation algorithm, roster config, health check, scaling |
+| — | [Agent Roles](docs/agent-roles.md) | All 7 directions with generic keyword-based role briefs |
+| — | [Coordinator Guide](docs/coordinator-guide.md) | 4-step reconciliation algorithm, roster config, health check, scaling |
 | — | [V3 → V4 Migration](docs/v3-to-v4-migration.md) | What changed, key differences, migration steps |
 
 ### V3 Documentation (Historical)
