@@ -1,10 +1,10 @@
-# Recommended Tooling
+# Tooling — Tools & Setup
 
-> These are the specific tools we use and why. Not an exhaustive comparison — just what works.
+> The specific tools we use and why. Not exhaustive — just what works.
 
 ## GitHub Apps — Bot Identity
 
-### Why GitHub Apps Instead of Personal Access Tokens
+### Why GitHub Apps Over Personal Access Tokens
 
 | Feature | PAT | GitHub App |
 |---------|-----|-----------|
@@ -13,26 +13,26 @@
 | Token expiry | Never (or manual) | 1 hour (auto-rotate) |
 | Per-repo install | No | Yes |
 | Rate limits | 5,000/hr (shared with you) | 5,000/hr per installation |
-| Audit trail | "shtse8 merged PR" | "sylphx-builder[bot] opened PR" |
+| Audit trail | "you merged PR" | "builder-bot[bot] opened PR" |
 
-### Our Setup: Two Apps
+### Two-App Setup
 
-**sylphx-builder** — the Builder agent's identity
+**Builder App** — the Builder agent's identity:
 - Permissions: `contents: write`, `pull-requests: write`, `issues: write`
-- Used for: creating branches, pushing code, opening PRs, commenting on issues
-- Cannot: approve PRs, manage repo settings, delete repos
+- Used for: creating branches, pushing code, opening PRs, commenting
+- Cannot: approve PRs, manage settings, delete repos
 
-**sylphx-reviewer** — the Reviewer agent's identity
-- Permissions: `pull-requests: write` (for approvals), `contents: read`
+**Reviewer App** — the Reviewer agent's identity:
+- Permissions: `pull-requests: write`, `contents: read`
 - Used for: reviewing PRs, approving or requesting changes
-- Cannot: push code, merge PRs, modify repo settings
+- Cannot: push code, merge, modify settings
 
-**Why two apps?** Branch protection requires that the approval comes from a different account than the PR author. If the Builder opens a PR as `sylphx-builder[bot]` and the Reviewer approves as `sylphx-reviewer[bot]`, the branch protection rule is satisfied.
+**Why two apps?** Branch protection requires approval from a different account than the PR author. Builder opens as `builder[bot]`, Reviewer approves as `reviewer[bot]`. Requirement satisfied automatically.
 
 ### Token Generation
 
 ```javascript
-// gh-app-token.js — generates a short-lived installation token
+// Generate a short-lived installation token
 const { createAppAuth } = require('@octokit/auth-app');
 
 const auth = createAppAuth({
@@ -42,200 +42,176 @@ const auth = createAppAuth({
 });
 
 const { token } = await auth({ type: 'installation' });
-console.log(token); // Valid for 1 hour
+// Token valid for 1 hour
 ```
 
-Usage in scripts:
+Usage:
 ```bash
-export GH_TOKEN=$(node /path/to/gh-app-token.js builder)
+export GH_TOKEN=$(node gh-app-token.js builder)
 gh pr create --title "feat: add login page" --body "Closes #42"
 ```
 
-### Token Rotation
+### Token Limitations
 
-GitHub App installation tokens expire after 1 hour. For long-running agents:
+GitHub App tokens can't do everything:
+- ❌ Can't read branch protection rules (403)
+- ❌ Can't override third-party commit statuses (e.g., Vercel)
+- ❌ Can't access repo settings
 
-```typescript
-class TokenManager {
-  private token: string;
-  private expiresAt: Date;
+Use a personal account (`gh` default auth) for these operations.
 
-  async getToken(): Promise<string> {
-    if (!this.token || this.isExpired()) {
-      this.token = await generateToken();
-      this.expiresAt = new Date(Date.now() + 55 * 60 * 1000); // 55 min buffer
-    }
-    return this.token;
-  }
+## Cron Scheduling
 
-  private isExpired(): boolean {
-    return new Date() >= this.expiresAt;
-  }
-}
+The Coordinator runs on a cron schedule (every 5 minutes). We use [OpenClaw](https://github.com/nicepkg/openclaw) for scheduling:
+
+```
+Interval: 5 minutes
+Model: Claude Opus (strongest reasoning for coordination decisions)
+Thinking: High
 ```
 
-## GitHub Actions — CI
+### Cron vs Webhook
 
-### Why Actions
+| Feature | Cron | Webhook |
+|---------|------|---------|
+| Latency | 0-5 min | Instant |
+| Infrastructure | None (built into orchestrator) | Endpoint + auth + retry logic |
+| Reliability | Very high | Depends on delivery |
+| Event storms | Naturally rate-limited | Can overwhelm |
+| Global state | Yes (reads everything each cycle) | No (reacts to individual events) |
 
-- Native GitHub integration (no webhook setup, no separate service)
-- Free for public repos
-- Excellent ecosystem of actions (`actions/checkout`, `actions/setup-node`, etc.)
-- Concurrency controls built-in
-- Matrix builds for testing across Node versions
+**Our choice:** Cron for coordination, GitHub Actions (event-driven) for CI.
 
-### Our CI Config
+## GitHub Labels Schema
 
-See [CI/CD Pipeline](05-ci-pipeline.md) for the full workflow. Key actions we use:
+The full label set for the pipeline FSM:
 
-```yaml
-- actions/checkout@v4          # Checkout code
-- actions/setup-node@v4        # Install Node.js with caching
-- pnpm/action-setup@v4         # Install pnpm
-- oven-sh/setup-bun@v2         # Install Bun
-- actions/github-script@v7     # Run JS in CI (for issue creation, comments)
-- ariga/setup-atlas@v1         # Install Atlas for migration checks
-```
+### Pipeline State Labels (mutually exclusive per issue)
 
-### Cost Control
+| Label | Color | Description |
+|-------|-------|-------------|
+| `pipeline/discovered` | `#FBCA04` | Newly discovered, awaiting triage |
+| `pipeline/approved` | `#0E8A16` | Triaged, ready for builder |
+| `pipeline/rejected` | `#B60205` | Triaged, not worth doing |
+| `pipeline/in-progress` | `#1D76DB` | Builder actively working |
+| `pipeline/pr-open` | `#5319E7` | PR created, awaiting review |
+| `pipeline/review-passed` | `#0E8A16` | Review approved, ready to merge |
+| `pipeline/review-failed` | `#E99695` | Review requested changes |
+| `pipeline/merged` | `#006B75` | Successfully merged |
+| `pipeline/abandoned` | `#D93F0B` | Work abandoned |
 
-For private repos, Actions minutes cost money. Tips:
-- Use `concurrency` + `cancel-in-progress` to kill stale runs
-- Cache `node_modules` aggressively
-- Use `timeout-minutes` to prevent runaway builds
-- Skip CI on docs-only changes:
+### Priority Labels
 
-```yaml
-on:
-  pull_request:
-    paths-ignore:
-      - '**.md'
-      - 'docs/**'
-      - '.github/ISSUE_TEMPLATE/**'
-```
+| Label | Color | Description |
+|-------|-------|-------------|
+| `priority/P0` | `#B60205` | Critical — do immediately |
+| `priority/P1` | `#D93F0B` | Important — do soon |
+| `priority/P2` | `#FBCA04` | Nice-to-have — when idle |
 
-## Atlas — Database Migrations
+### Type Labels
 
-### Why Atlas Over Drizzle Migrations
+| Label | Color | Description |
+|-------|-------|-------------|
+| `type/bug` | `#D73A4A` | Bug fix |
+| `type/enhancement` | `#A2EEEF` | Feature or improvement |
+| `type/chore` | `#D4C5F9` | Maintenance, cleanup |
+| `type/security` | `#B60205` | Security-related |
+| `type/performance` | `#F9D0C4` | Performance improvement |
 
-| Feature | Drizzle Migrations | Atlas |
-|---------|-------------------|-------|
-| Approach | Imperative (write SQL) | Declarative (describe schema) |
-| Parallel agents | Broken (sequential numbering) | Works (schema diff) |
-| Rollback | Manual | Automatic |
-| Lint | None | Built-in (destructive change detection) |
-| CI integration | Manual | `atlas migrate lint` |
+### Size Labels
 
-### Quick Start
+| Label | Color | Description |
+|-------|-------|-------------|
+| `size/XS` | `#009800` | < 20 lines |
+| `size/S` | `#77BB00` | 20-100 lines |
+| `size/M` | `#FBCA04` | 100-300 lines |
+| `size/L` | `#D93F0B` | 300-500 lines |
+
+### Source Labels
+
+| Label | Color | Description |
+|-------|-------|-------------|
+| `source/scout` | `#C5DEF5` | Created by Scout agent |
+| `source/human` | `#BFD4F2` | Created by human |
+| `source/sentinel` | `#D4C5F9` | Created by Sentinel |
+
+### Meta Labels
+
+| Label | Color | Description |
+|-------|-------|-------------|
+| `agent-authored` | `#EDEDED` | PR was written by an agent |
+
+### Creating All Labels (Script)
 
 ```bash
-# Install
-curl -sSf https://atlasgo.sh | sh
+#!/bin/bash
+REPO="your-org/your-repo"
 
-# Initialize from existing database
-atlas schema inspect --url "postgresql://..." > schema.hcl
+# Pipeline state
+gh label create "pipeline/discovered" --repo $REPO --color "FBCA04" --force
+gh label create "pipeline/approved" --repo $REPO --color "0E8A16" --force
+gh label create "pipeline/rejected" --repo $REPO --color "B60205" --force
+gh label create "pipeline/in-progress" --repo $REPO --color "1D76DB" --force
+gh label create "pipeline/pr-open" --repo $REPO --color "5319E7" --force
+gh label create "pipeline/review-passed" --repo $REPO --color "0E8A16" --force
+gh label create "pipeline/review-failed" --repo $REPO --color "E99695" --force
+gh label create "pipeline/merged" --repo $REPO --color "006B75" --force
+gh label create "pipeline/abandoned" --repo $REPO --color "D93F0B" --force
 
-# Generate migration from schema change
-atlas migrate diff add_feature --env local
+# Priority
+gh label create "priority/P0" --repo $REPO --color "B60205" --force
+gh label create "priority/P1" --repo $REPO --color "D93F0B" --force
+gh label create "priority/P2" --repo $REPO --color "FBCA04" --force
 
-# Apply in production
-atlas migrate apply --env production
+# Type
+gh label create "type/bug" --repo $REPO --color "D73A4A" --force
+gh label create "type/enhancement" --repo $REPO --color "A2EEEF" --force
+gh label create "type/chore" --repo $REPO --color "D4C5F9" --force
+gh label create "type/security" --repo $REPO --color "B60205" --force
+gh label create "type/performance" --repo $REPO --color "F9D0C4" --force
+
+# Size
+gh label create "size/XS" --repo $REPO --color "009800" --force
+gh label create "size/S" --repo $REPO --color "77BB00" --force
+gh label create "size/M" --repo $REPO --color "FBCA04" --force
+gh label create "size/L" --repo $REPO --color "D93F0B" --force
+
+# Source
+gh label create "source/scout" --repo $REPO --color "C5DEF5" --force
+gh label create "source/human" --repo $REPO --color "BFD4F2" --force
+gh label create "source/sentinel" --repo $REPO --color "D4C5F9" --force
+
+# Meta
+gh label create "agent-authored" --repo $REPO --color "EDEDED" --force
+
+echo "All labels created!"
 ```
 
-See [Migration Strategy](06-migration-strategy.md) for the full migration path.
+## Branch Protection (API)
 
-## Drizzle ORM — Queries & Type Safety
-
-We still use Drizzle for queries. It's excellent at:
-
-```typescript
-// Type-safe queries
-const users = await db
-  .select()
-  .from(usersTable)
-  .where(eq(usersTable.email, email))
-  .limit(1);
-
-// Type-safe inserts
-await db.insert(usersTable).values({
-  email: 'user@example.com',
-  name: 'Test User',
-});
-
-// Relations
-const posts = await db.query.posts.findMany({
-  with: { author: true, comments: true },
-  where: eq(posts.published, true),
-});
+```bash
+gh api repos/{owner}/{repo}/branches/main/protection \
+  --method PUT \
+  --field required_status_checks='{"strict":false,"contexts":["build"]}' \
+  --field enforce_admins=false \
+  --field required_pull_request_reviews='{"required_approving_review_count":1,"dismiss_stale_reviews":true}' \
+  --field restrictions=null \
+  --field required_linear_history=true \
+  --field allow_force_pushes=false \
+  --field allow_deletions=false
 ```
-
-**The separation**: Drizzle handles queries and TypeScript types. Atlas handles migrations. They share the same database, and we keep the Drizzle schema file and Atlas schema file in sync.
-
-## Vercel — Production Deploys
-
-### Why Vercel
-
-- Zero-config Next.js deploys
-- Automatic preview deployments on PRs
-- Edge functions for API routes
-- Built-in analytics and monitoring
-- Git-based deploys (push to main = deploy to production)
-
-### Configuration
-
-```json
-// vercel.json
-{
-  "framework": "nextjs",
-  "buildCommand": "pnpm build",
-  "installCommand": "pnpm install --frozen-lockfile"
-}
-```
-
-### The Gotchas
-
-1. **Ignore build step** exit codes are backwards (see [Lessons Learned #3](07-lessons-learned.md))
-2. **Environment variables** must be set in Vercel dashboard, not just `.env`
-3. **Build cache** can cause stale deploys — clear it when things are weird
-4. **Preview deploys** use the PR branch, not the merged result — they can pass even if the merge would fail
-
-## Branch Protection + Auto-Merge — The Merge Safety Net
-
-This combination replaces the need for any agent to have merge permissions:
-
-```
-Branch Protection:
-  ✓ Require CI to pass
-  ✓ Require 1 approval
-  ✓ Require up-to-date branch
-
-Auto-Merge:
-  ✓ Enabled
-  ✓ Squash merge only
-  ✓ Auto-delete branches
-```
-
-**The flow**:
-1. Builder opens PR → CI runs
-2. Reviewer approves → auto-merge is armed
-3. CI passes → PR merges automatically
-4. Branch is deleted automatically
-
-No agent touches the merge button. No agent has merge permissions. The infrastructure handles it.
 
 ## Tool Stack Summary
 
 ```
-Code         → AI Agents (Builder, Reviewer, Fixer)
-Coordination → Coordinator Agent + GitHub Issues/PRs
-CI           → GitHub Actions
+Code         → AI Agents (Scout, Triage, Builder, Reviewer, Merger, Sentinel)
+Coordination → Reconciliation loop (cron, 5 min)
+State        → GitHub (issues + labels + PRs)
+CI           → GitHub Actions (single required check: build)
 Deploy       → Vercel (auto-deploy on main push)
-Database     → PostgreSQL
-Migrations   → Atlas (declarative)
-ORM          → Drizzle (queries + types)
 Identity     → GitHub Apps (builder + reviewer)
-Merge Safety → Branch Protection + Auto-Merge
-Monitoring   → Vercel Analytics + GitHub Actions logs
+Merge        → Squash only, strict: false, batch merge
+Monitoring   → Sentinel (post-merge health check)
+Learning     → pipeline-learning-log.md (rejection patterns)
+Metrics      → Pinned GitHub issue (updated each cycle)
 ```
-
-Everything is managed through GitHub. Issues are the task queue. PRs are the review pipeline. Actions are the CI. Branch protection is the safety net. Auto-merge is the closer.

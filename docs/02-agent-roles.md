@@ -1,196 +1,347 @@
-# Agent Roles & Responsibilities
+# Agent Roles — The Six Agents
 
-> Every agent has exactly one job. The moment an agent starts doing two things, both things break.
+> Every agent has exactly one job. The moment an agent does two things, both break.
+> The #1 missing piece in v1/v2 was Triage. Without it, 30-50% of work is wasted.
 
-## The Six Roles
+## Overview
 
-### 🎯 Coordinator
-
-**Job**: Orchestrate the workflow. Spawn agents. Track progress. NEVER write code.
-
-The Coordinator is the air traffic controller. It:
-- Reads open issues and decides which to work on
-- Spawns Builder agents with specific issue assignments
-- Spawns Reviewer agents when PRs are ready
-- Monitors for stale PRs and stuck agents
-- Runs audit cycles to find new work
-
-**What it must NOT do:**
-- Write code (not even "just a small fix")
-- Merge PRs (that's GitHub's job via auto-merge)
-- Review PRs (that's the Reviewer's job)
-- Create cron jobs without explicit permission
-- Make architectural decisions
-
-**Why the Coordinator must never merge:**
-We learned this the hard way. When the Coordinator had merge permissions, it would:
-1. See an approved PR
-2. Call the merge API immediately
-3. Skip waiting for CI to finish
-4. Merge code that doesn't build
-
-The fix: remove merge capability entirely. Auto-merge handles it.
-
-### 🔨 Builder
-
-**Job**: Implement a single issue. Create one PR.
-
-The Builder receives a specific issue and:
-1. Creates a feature branch (`feat/issue-123-add-login-page`)
-2. Reads the issue description and any linked context
-3. Implements the solution
-4. Runs `pnpm build` and `pnpm lint` locally before pushing
-5. Opens a PR with a clear description referencing the issue
-6. Stops. Does not review. Does not merge. Does not pick up the next issue.
-
-**Naming convention for branches:**
 ```
-feat/issue-{number}-{short-description}
-fix/issue-{number}-{short-description}
-chore/issue-{number}-{short-description}
+Scout → discovers issues
+Triage → approves or rejects (THE critical quality gate)
+Builder → implements approved issues
+Reviewer → reviews PRs
+Merger → merges approved PRs
+Sentinel → monitors production health post-merge
 ```
 
-**PR description template:**
+Supporting roles (spawned as needed):
+- **Fixer** — addresses review feedback on existing PRs
+- **Rebaser** — resolves merge conflicts
+- **CI Fixer** — fixes build failures
+
+## 🔍 Scout (Discovery Agent)
+
+**Job**: Find things worth fixing in the codebase.
+
+| Aspect | Detail |
+|--------|--------|
+| **Trigger** | Coordinator dispatches when backlog < threshold |
+| **Input** | Codebase, recent git log, existing issues (for dedup), learning log |
+| **Output** | GitHub issues with `pipeline/discovered` label |
+| **Constraints** | Max 10 issues per run. MUST check for duplicates. MUST reference specific code. |
+
+**What to look for:** Bugs, security vulnerabilities, performance issues, dead code, missing error handling, accessibility gaps, outdated dependencies.
+
+**What NOT to create issues for:** Cosmetic changes, subjective style preferences, issues already covered by open PRs, features outside the app's scope.
+
+**Why duplicate detection matters:** Without it, the Scout creates the same issue repeatedly. Check against both open AND recently closed issues before creating anything.
+
+### Scout Issue Template
+
+```markdown
+## Problem
+{What's wrong? Be specific — file paths, line numbers, error messages.}
+
+## Location
+- `src/path/to/file.ts:42-67`
+
+## Suggested Approach
+{How should this be fixed? Concrete, implementable suggestion.}
+
+## Impact
+- **Users affected**: {who/what}
+- **Severity**: low/medium/high
+- **Frequency**: {how often}
+```
+
+---
+
+## ⚖️ Triage (Quality Gate)
+
+**Job**: Decide if discovered issues are worth pursuing. This is THE critical quality gate.
+
+| Aspect | Detail |
+|--------|--------|
+| **Trigger** | Issues with `pipeline/discovered` label |
+| **Input** | Issue content, codebase context, project goals, learning log, current workload |
+| **Output** | APPROVE (with priority + size labels) or REJECT (with reasoning) |
+| **Constraints** | Every issue MUST get a decision. No "maybe." |
+
+### Why Triage Is the #1 Missing Piece
+
+In v1 and v2 of our pipeline, issues went straight from Scout to Builder. The result:
+
+- Builders spent hours implementing cosmetic changes that added no value
+- PRs were opened for features outside the project's scope
+- The same bug was "discovered" and built 3 times before anyone noticed
+- Review rejection rate was 60%+ because the work shouldn't have been started
+
+**Adding Triage dropped wasted work by 30-50%.** It's the single highest-leverage improvement you can make.
+
+### Triage Criteria
+
+Every issue is evaluated on six dimensions:
+
+1. **Value**: Does this meaningfully improve the product, DX, performance, or security?
+   - ❌ Reject: Cosmetic-only, subjective style, trivial naming
+   - ✅ Approve: Bug fixes, security patches, meaningful UX improvements
+
+2. **Scope**: Is this within the project's goals?
+   - ❌ Reject: Tangential features, yak-shaving, out-of-scope
+   - ✅ Approve: Direct product improvements, necessary maintenance
+
+3. **Feasibility**: Can an agent implement this in a single PR?
+   - ❌ Reject: Needs external service setup, requires human credentials
+   - ✅ Approve: Well-defined code changes, clear acceptance criteria
+
+4. **Size**: Small enough for one PR? (Target: < 500 lines)
+   - ❌ Reject (with suggestion to split): Too large
+   - ✅ Approve with size label: XS/S/M/L
+
+5. **Duplication**: Already covered by an existing issue or PR?
+   - ❌ Reject: Duplicate (reference the existing issue)
+   - ✅ Approve: Unique work
+
+6. **Risk**: Could this break things? What's the blast radius?
+   - High risk (auth, data, payments) → P0 + extra scrutiny
+   - Medium risk (UI, new features) → P1
+   - Low risk (docs, minor fixes) → P2
+
+### Learning Loop
+
+Triage rejections are logged in `docs/pipeline-learning-log.md` and fed back into the Scout's prompt. Over time, the Scout stops creating issues that Triage rejects. Target rejection rate: 30-50%.
+
+---
+
+## 🏗️ Builder (Implementation Agent)
+
+**Job**: Take one approved issue and produce one working PR.
+
+| Aspect | Detail |
+|--------|--------|
+| **Trigger** | Issues with `pipeline/approved` + no assignee |
+| **Input** | Issue description, codebase, conventions, learning log |
+| **Output** | Pull request linking to the issue |
+| **Constraints** | Max 1 issue at a time. PR < 500 lines. MUST pass local build before opening PR. |
+
+### Builder Rules (from rejection research)
+
+Research from arXiv (2602.04226) shows the top reasons agent PRs get rejected:
+
+1. **Too large / hard to review** → Keep PRs small, one concern per PR
+2. **No added value** → Don't refactor unrelated code
+3. **Increased complexity** → Follow existing patterns exactly
+4. **Context limitations** → Read the full codebase context, not just the issue
+
+### Builder Workflow
+
+```
+1. Assign self to the issue
+2. Create branch: agent/{issue-number}-{short-slug}
+3. Read issue + relevant code context + learning log
+4. Implement the fix (small, focused changes)
+5. Run build + lint locally (MANDATORY — do not skip)
+6. Open PR with description: "Closes #{issue_number}"
+7. Update issue label: pipeline/in-progress → pipeline/pr-open
+8. STOP. Do not review. Do not merge. Do not pick up next issue.
+```
+
+### PR Description Template
+
 ```markdown
 Closes #{issue_number}
 
-## What changed
-- Brief description of changes
+## Summary
+{What changed and why — not just what, but WHY}
 
-## How to test
-- Steps to verify the change works
+## Changes
+- `src/path/file.ts` — {what changed}
+- `src/path/other.ts` — {what changed}
 
-## Files changed
-- `src/components/LoginPage.tsx` — new component
-- `src/lib/auth.ts` — added login function
+## Testing
+- [x] TypeScript compiles
+- [x] Build passes
+- [x] Lint passes
 ```
 
-### 👀 Reviewer
+---
+
+## 👁️ Reviewer (Review Agent)
 
 **Job**: Review a single PR. Approve or request changes.
 
-The Reviewer:
-1. Reads the PR diff
-2. Checks for: correctness, style, potential bugs, missing tests
-3. Either approves with a comment, or requests changes with specific feedback
-4. If requesting changes, clearly describes what needs to change and why
+| Aspect | Detail |
+|--------|--------|
+| **Trigger** | PRs with `pipeline/pr-open` + CI green + no review |
+| **Input** | PR diff, linked issue, codebase context, CI status |
+| **Output** | APPROVE or REQUEST_CHANGES with specific feedback |
+| **Constraints** | MUST wait for CI green. Uses separate GitHub App identity from Builder. |
 
-**Reviewer rules:**
-- Never approve without reading the full diff
-- If the PR is too large to review confidently, request it be split
-- Don't nitpick style if there's a linter — let the linter handle it
-- Focus on logic errors, missing edge cases, and security issues
-- If the PR looks like a duplicate of another PR, flag it
+### Review Checklist
 
-**Using GitHub Apps for review identity:**
-We use two GitHub Apps: `sylphx-builder` and `sylphx-reviewer`. This separation means:
-- The Builder can't approve its own PRs
-- Branch protection requires approval from a different account
-- Audit trail clearly shows who built and who reviewed
+- [ ] Does the PR address the linked issue?
+- [ ] Are there logic errors or unhandled edge cases?
+- [ ] Does it follow project conventions and existing patterns?
+- [ ] Is there unnecessary complexity or over-engineering?
+- [ ] Could this break existing functionality?
+- [ ] Is the change size reasonable (< 500 lines)?
+- [ ] Are there security implications?
 
-### 🔧 Fixer
+### Identity Separation
 
-**Job**: Address review feedback on an existing PR.
+The Reviewer uses a DIFFERENT GitHub App from the Builder:
+- `sylphx-builder[bot]` opens the PR
+- `sylphx-reviewer[bot]` approves (or requests changes)
 
-When a Reviewer requests changes:
-1. The Coordinator spawns a Fixer for that specific PR
-2. The Fixer reads the review comments
-3. Makes the requested changes on the same branch
-4. Pushes a new commit
-5. Comments on the PR that changes are ready for re-review
+Branch protection requires approval from a different account than the PR author. This is enforced automatically.
 
-**Why not let the original Builder fix it?**
-In practice, spawning a new agent is simpler than resuming a previous one's context. The Fixer starts fresh, reads the review comments, and makes targeted changes. This avoids context bloat from the original implementation session.
+### GitHub `reviewDecision` Bug
 
-### 🔀 Rebaser
+**Critical learning:** GitHub's `reviewDecision` field stays `CHANGES_REQUESTED` even after the reviewer submits a new approval — if the old review isn't explicitly dismissed.
 
-**Job**: Resolve merge conflicts on a PR that's fallen behind `main`.
+**Fix:** The Reviewer must dismiss stale `CHANGES_REQUESTED` reviews before submitting a new approval:
 
-When a PR has conflicts:
-1. The Coordinator spawns a Rebaser for that specific PR
-2. The Rebaser fetches latest `main`
-3. Rebases the PR branch, resolving conflicts
-4. Force-pushes the rebased branch
-5. CI re-runs automatically
+```bash
+# Get stale review IDs
+gh api repos/{owner}/{repo}/pulls/{N}/reviews \
+  --jq '.[] | select(.state == "CHANGES_REQUESTED") | .id'
 
-**This is a targeted role.** Most PRs won't need it — if you have "Require branches to be up to date" enabled, only one PR can merge at a time, and the rest queue naturally. The Rebaser handles the cases where a PR has been open long enough for conflicts to develop.
-
-### 🔍 Auditor
-
-**Job**: Find new work. Identify bugs, improvements, and feature opportunities.
-
-The Auditor:
-1. Reads the current codebase
-2. Checks for: TODO comments, missing error handling, accessibility issues, performance problems
-3. Creates well-specified GitHub issues for each finding
-4. Labels issues appropriately (bug, enhancement, chore)
-
-**Auditor output format:**
-```markdown
-## Title: [Bug] MobileTabBar renders outside AuthProvider
-
-## Description
-The MobileTabBar component uses `useAuth()` but is rendered in the root layout
-outside the AuthProvider boundary. This causes a runtime error on mobile devices
-that doesn't surface in the build step.
-
-## Steps to Reproduce
-1. Open the app on mobile
-2. Navigate to any page with the tab bar
-3. Observe: "Error: useAuth must be used within an AuthProvider"
-
-## Expected Behavior
-MobileTabBar should be inside the AuthProvider, or should handle the case
-where auth context is unavailable.
-
-## Files Involved
-- `src/app/layout.tsx` (line 42)
-- `src/components/MobileTabBar.tsx`
+# Dismiss each
+gh api -X PUT repos/{owner}/{repo}/pulls/{N}/reviews/{REVIEW_ID}/dismissals \
+  -f message="Superseded by re-review" -f event="DISMISS"
 ```
 
-## How Agents Communicate
+---
 
-Agents don't talk to each other directly. They communicate through GitHub:
+## 🚀 Merger (Ship Agent)
+
+**Job**: Merge approved PRs safely.
+
+| Aspect | Detail |
+|--------|--------|
+| **Trigger** | PRs with `pipeline/review-passed` + CI green + no conflicts |
+| **Input** | PR state, CI status, merge conflict status |
+| **Output** | Merged PR, closed issue with `pipeline/merged` label |
+| **Constraints** | ALL checks must pass. Never force merge. |
+
+### Batch Merging
+
+With `strict: false`, **merge ALL ready PRs in the same cycle**. No need to wait, no need to rebase between merges.
+
+```bash
+# Merge all ready PRs in sequence — they don't need to be serialized
+gh pr merge 409 --squash --delete-branch
+gh pr merge 410 --squash --delete-branch
+gh pr merge 411 --squash --delete-branch
+# ... all in the same coordinator cycle
+```
+
+On launch day, we merged **14 PRs in 2 minutes** using this approach.
+
+### Vercel Stuck Status Workaround
+
+Vercel sometimes leaves commit statuses in `pending` forever. If Vercel is pending for >10 minutes, override:
+
+```bash
+gh api repos/{owner}/{repo}/statuses/{SHA} \
+  -f state=success \
+  -f context=Vercel \
+  -f description="Override stale pending"
+```
+
+**Note:** GitHub App tokens can't override third-party statuses. Use a personal account for this.
+
+---
+
+## 🛡️ Sentinel (Health Monitor)
+
+**Job**: Post-merge verification and production health monitoring. The safety net that makes `strict: false` safe.
+
+| Aspect | Detail |
+|--------|--------|
+| **Trigger** | After every merge + every coordinator cycle |
+| **Input** | Vercel deployment status, production health endpoint |
+| **Output** | Health verification comment on merged PRs, or P0 issue + revert if broken |
+| **Constraints** | Must identify which merge caused a failure |
+
+### How Sentinel Replaces `strict: true`
+
+`strict: true` prevents merging stale PRs (PRs that haven't been tested against the latest main). The concern: two PRs that individually pass CI might break when combined.
+
+Sentinel addresses this differently: **let them merge, then check immediately.** If production breaks:
+
+1. Identify the most recent merge as likely culprit
+2. Create a P0 issue with full context
+3. (Optional) Create a revert PR automatically
+4. Alert the coordinator to prioritize the fix
+
+In practice, semantic merge conflicts are rare for small, focused PRs (which our pipeline enforces). Sentinel has never had to revert a merge in our pipeline.
+
+### Health Check
+
+```bash
+HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" https://your-app.com)
+# 200 = healthy, anything else = alert
+```
+
+---
+
+## Supporting Roles
+
+### 🔧 Fixer
+Addresses review feedback on an existing PR. Spawned when a Reviewer requests changes. Reads review comments, makes targeted fixes, pushes to the same branch.
+
+### 🔀 Rebaser
+Resolves merge conflicts. Fetches latest main, rebases the PR branch, resolves conflicts, force-pushes. Only needed when PRs have been open long enough for conflicts to develop.
+
+### 🔨 CI Fixer
+Fixes build failures on PRs. Reads CI logs, diagnoses the root cause, pushes a fix. Common issues: missing imports, type errors, missing dependencies.
+
+---
+
+## Communication Pattern
+
+Agents don't talk to each other. They communicate through GitHub:
 
 ```
 Coordinator reads issues → spawns Builder
-Builder creates PR → Coordinator notices new PR → spawns Reviewer
+Builder creates PR → Coordinator notices → spawns Reviewer
 Reviewer requests changes → Coordinator notices → spawns Fixer
-Fixer pushes commit → Reviewer re-reviews → approves
-Auto-merge merges the PR
+Fixer pushes fix → Coordinator notices → spawns Reviewer again
+Reviewer approves → Coordinator notices → Merger merges
+Sentinel verifies production health
 ```
 
-GitHub is the message bus. Issues and PRs are the messages. This is intentional:
-- Everything is logged and auditable
-- No custom communication protocol to maintain
-- Any agent can be replaced without changing the protocol
-- Humans can participate at any point by commenting on issues/PRs
+GitHub is the message bus. Issues and PRs are the messages. Everything is logged and auditable.
+
+---
 
 ## Scaling
 
-Start with one Coordinator. Add Builders as needed. You'll typically want:
+| Project Phase | Builders | Reviewers | WIP Limit | Throughput |
+|--------------|----------|-----------|-----------|------------|
+| Starting out | 2-3 | 1 | 3 | ~5 PRs/day |
+| Active | 5-7 | 1-2 | 5 | ~15 PRs/day |
+| Full speed | 10 | 2 | 10 | ~30 PRs/hour |
 
-| Project Phase | Builders | Reviewers | Coordinators |
-|--------------|----------|-----------|-------------|
-| Early (0-10 issues) | 1 | 1 | 1 |
-| Active (10-50 issues) | 2-3 | 1 | 1 |
-| Heavy (50+ issues) | 3-5 | 1-2 | 1 |
+**Never run more than one Coordinator.** Two coordinators = duplicate agents, conflicting decisions, double API costs.
 
-**Never run more than one Coordinator.** Two coordinators will spawn duplicate agents and create conflicting PRs. If one coordinator is a bottleneck, make it faster — don't add another.
+---
 
 ## Identity & Authentication
 
-Each role should have its own GitHub identity:
+Each role needs its own GitHub identity:
 
-```
-Builder  → sylphx-builder[bot]    (GitHub App)
-Reviewer → sylphx-reviewer[bot]   (GitHub App)
-```
+| Role | Identity | Permissions |
+|------|----------|-------------|
+| Builder | `sylphx-builder[bot]` (GitHub App) | `contents: write`, `pull-requests: write`, `issues: write` |
+| Reviewer | `sylphx-reviewer[bot]` (GitHub App) | `pull-requests: write`, `contents: read` |
+| Merger | Uses Builder token | Same as Builder |
+| Sentinel | Uses Builder token | Same as Builder |
 
-The Coordinator doesn't need its own GitHub identity — it operates through the other agents' identities by spawning them.
-
-**Why GitHub Apps instead of PATs?**
-- Apps have scoped permissions (builder can't delete repos)
-- Apps have separate identities (clear audit trail)
-- App tokens expire automatically (1-hour TTL)
-- Apps can be installed per-repo (principle of least privilege)
+**Why GitHub Apps?**
+- Scoped permissions (builder can't delete repos)
+- Separate identities (clear audit trail)
+- Auto-expiring tokens (1-hour TTL)
+- Per-repo installation (least privilege)
+- Separate rate limits (5,000/hr per app)

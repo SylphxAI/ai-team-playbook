@@ -1,28 +1,18 @@
-# CI/CD Pipeline Design
+# CI Pipeline — Speed Over Ceremony
 
-> CI is your only quality gate. Make it fast, make it reliable, make it mandatory.
+> Your CI should catch real problems fast. Not gatekeep with slow, flaky checks.
+> Required check: `build` only. Lint as non-blocking. Sentinel as safety net.
 
-## Overview
+## Philosophy
 
-```
-PR opened/updated
-    ↓
-GitHub Actions: build + lint + type-check + test
-    ↓
-Review (agent or human)
-    ↓
-Auto-merge (squash) when approved + CI green
-    ↓
-Push to main
-    ↓
-Vercel auto-deploy to production
-    ↓
-Post-merge verification
-```
+With autonomous agents creating 30+ PRs/day, CI speed is directly proportional to throughput. Every minute of CI time is multiplied across every PR.
 
-## GitHub Actions: PR Validation
+**Our approach:**
+- **One required check:** `build` (includes TypeScript compilation)
+- **Lint as non-blocking:** `continue-on-error: true` (agents fix lint issues but CI doesn't block on them)
+- **Minimal required checks:** Speed + Sentinel post-merge monitoring as safety net
 
-### Full CI Workflow
+## CI Workflow
 
 ```yaml
 # .github/workflows/ci.yml
@@ -38,10 +28,6 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
-env:
-  TURBO_TOKEN: ${{ secrets.TURBO_TOKEN }}
-  TURBO_TEAM: ${{ vars.TURBO_TEAM }}
-
 jobs:
   build:
     name: Build & Validate
@@ -55,188 +41,91 @@ jobs:
         with:
           bun-version: latest
 
-      - uses: pnpm/action-setup@v4
-        with:
-          version: 9
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: pnpm
-
       - name: Install dependencies
-        run: pnpm install --frozen-lockfile
+        run: bun install --frozen-lockfile
 
       - name: Lint
-        run: pnpm lint
+        run: bun run lint
+        continue-on-error: true  # Non-blocking
 
       - name: Type check
-        run: pnpm tsc --noEmit
+        run: bun run typecheck
 
       - name: Build
-        run: pnpm build
-        env:
-          # Suppress Next.js telemetry
-          NEXT_TELEMETRY_DISABLED: 1
-          # Provide dummy env vars that the build needs but aren't secret
-          DATABASE_URL: "postgresql://dummy:dummy@localhost:5432/dummy"
+        run: bun run build
 
       - name: Test
-        run: pnpm test
+        run: bun test
         if: hashFiles('**/*.test.*', '**/*.spec.*') != ''
 ```
 
-### Key Design Decisions
+## Key Design Decisions
 
-**`concurrency` with `cancel-in-progress`**: When an agent pushes a fix commit, the old CI run is cancelled immediately. Without this:
-- You burn Actions minutes on stale runs
-- The PR shows a "pending" check from the old run alongside the new run
-- Agents get confused about which status to trust
+### Why Only `build` Is Required
 
-**`timeout-minutes: 10`**: Hard cap. We've seen AI-generated code that:
-- Created infinite loops in tests
-- Imported a module that triggered a build-time fetch to a non-existent URL (30-minute DNS timeout)
-- Generated a component that recursively rendered itself
+Adding more required checks (lint, test, type-check as separate jobs) seems safer, but:
 
-**Dummy env vars for build**: Next.js needs `DATABASE_URL` at build time for Drizzle schema generation, even though no actual database connection happens. Provide dummy values to unblock the build.
+1. **More checks = more failure points.** Each check can independently have flaky behavior.
+2. **Parallel jobs mean CI takes as long as the slowest.** One slow check blocks everything.
+3. **The `build` step already includes type-checking** for Next.js projects.
+4. **Sentinel catches anything CI misses** via post-merge monitoring.
 
-**`--frozen-lockfile`**: Agents sometimes run `pnpm install` and accidentally modify the lockfile. This flag ensures CI fails if the lockfile doesn't match `package.json`, forcing agents to commit the correct lockfile.
-
-## Vercel Deployment
-
-### Auto-Deploy on Push to Main
-
-Vercel deploys automatically when code hits `main`. Configuration:
-
-```json
-// vercel.json
-{
-  "framework": "nextjs",
-  "buildCommand": "pnpm build",
-  "installCommand": "pnpm install --frozen-lockfile",
-  "outputDirectory": ".next"
-}
-```
-
-### The Vercel Ignore Build Step Bug
-
-Vercel has an "Ignored Build Step" feature that lets you skip builds for certain commits. The configuration uses a shell script:
-
-```bash
-# vercel-ignore-build-step.sh — THIS IS WRONG
-if [ "$VERCEL_GIT_COMMIT_REF" = "main" ]; then
-  echo "Building on main"
-  exit 1  # 1 = proceed with build
-fi
-exit 0  # 0 = skip build
-```
-
-**The bug**: Exit code semantics are BACKWARDS from what you'd expect:
-- `exit 1` = **proceed** with build (non-zero = "yes, build")
-- `exit 0` = **skip** build (zero = "no, don't build")
-
-We had this inverted for a week. All PRs were deploying preview builds. No pushes to `main` were deploying to production. The app was stuck on a week-old version while we kept merging PRs.
-
-**Lesson**: Test your ignore build step by pushing a trivial change and checking the Vercel dashboard. Don't trust the logic — verify the behavior.
-
-### Manual Deploy Trigger
-
-For emergencies, add a manual deploy workflow:
+### Why Lint Is Non-Blocking
 
 ```yaml
-# .github/workflows/deploy.yml
-name: Manual Deploy
-
-on:
-  workflow_dispatch:
-    inputs:
-      environment:
-        description: 'Deploy environment'
-        required: true
-        default: 'production'
-        type: choice
-        options:
-          - production
-          - preview
-
-jobs:
-  deploy:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Deploy to Vercel
-        run: |
-          npx vercel --token=${{ secrets.VERCEL_TOKEN }} \
-            --prod=${{ github.event.inputs.environment == 'production' }}
+- name: Lint
+  run: bun run lint
+  continue-on-error: true  # ← This is intentional
 ```
+
+Lint catches style issues, not correctness issues. Blocking a PR because of a missing semicolon while production is waiting for a critical fix is wrong.
+
+Agents fix lint issues naturally (they run lint before pushing). The non-blocking approach means:
+- Lint failures are visible in the CI output
+- They don't block the merge
+- The Reviewer can flag lint issues in review if they're significant
+
+### Why `--frozen-lockfile`
+
+AI agents sometimes run `bun install` and accidentally modify the lockfile. `--frozen-lockfile` fails the build if the lockfile doesn't match `package.json`, forcing agents to commit the correct lockfile.
+
+### Why `cancel-in-progress`
+
+When an agent pushes a fix commit, the old CI run is cancelled immediately. Without this:
+- You burn Actions minutes on stale runs
+- The PR shows a "pending" check from the old run
+- Agents get confused about which status to trust
+
+### Why `timeout-minutes: 10`
+
+AI-generated code sometimes creates:
+- Infinite loops in tests
+- Build-time fetches to non-existent URLs (30-minute DNS timeout)
+- Components that recursively render themselves
+
+Hard cap prevents these from burning unlimited Actions minutes.
 
 ## Build Pipeline Order
 
-The order matters:
-
 ```
-1. Install (pnpm install --frozen-lockfile)
-2. Lint (catch style/import issues fast)
-3. Type check (catch type errors without full build)
-4. Build (full Next.js build — catches runtime config issues)
+1. Install (bun install --frozen-lockfile)
+2. Lint (non-blocking — fast feedback)
+3. Type check (catches type errors without full build)
+4. Build (full build — catches runtime config issues)
 5. Test (only if test files exist)
 ```
 
-**Why lint before build?** Lint is fast (5-10 seconds). If there's a missing import or unused variable, fail fast. Don't wait 2 minutes for the build to find it.
+**Why lint before build?** Lint is fast (5-10 seconds). If there's a missing import, fail fast.
 
-**Why type check separately?** `pnpm build` runs type checking as part of the Next.js build, but the error messages are mixed with build output. A separate `tsc --noEmit` gives clean, focused type errors.
-
-## Common CI Failures from AI Agents
-
-### 1. Missing Dependencies (pnpm strict mode)
-
-```
-error: Module not found: @hono/zod-validator
-```
-
-AI agents often use packages that are transitive dependencies (installed because something else depends on them) but not in `package.json`. This works with npm (hoisted `node_modules`) but fails with pnpm's strict isolation.
-
-**Fix**: Always add direct dependencies to `package.json`.
-
-### 2. Build-Only Errors
-
-```
-Error: useAuth must be used within an AuthProvider
-```
-
-This error doesn't appear at build time — Next.js happily compiles the component. It only appears at runtime. CI won't catch it unless you have integration tests.
-
-**Fix**: Add a basic render test for components that use context providers.
-
-### 3. Import Path Case Sensitivity
-
-```
-Module not found: Can't resolve './components/loginPage'
-# File is actually: ./components/LoginPage.tsx
-```
-
-macOS is case-insensitive, Linux (CI) is case-sensitive. Agents develop in a case-insensitive sandbox but CI runs on Linux.
-
-**Fix**: Add an ESLint rule or build check for case-sensitive imports.
-
-### 4. Environment Variable Assumptions
-
-```
-TypeError: Cannot read properties of undefined (reading 'split')
-# process.env.DATABASE_URL.split('/')
-```
-
-Agents assume env vars exist. Build step doesn't have them.
-
-**Fix**: Use `env:` in the CI workflow to provide dummy values, or use `zod` to validate env vars with defaults.
+**Why type check separately?** `build` runs type checking as part of the build, but errors are mixed with build output. Separate `tsc --noEmit` gives clean, focused type errors.
 
 ## Post-Merge Verification
 
-Even with CI gates, run a verification after every merge:
+Even with CI gates, verify after every merge to `main`:
 
 ```yaml
 # .github/workflows/post-merge.yml
-name: Post-Merge Build Check
+name: Post-Merge Verification
 
 on:
   push:
@@ -248,41 +137,82 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: pnpm
-      - run: pnpm install --frozen-lockfile
-      - run: pnpm build
+      - uses: oven-sh/setup-bun@v2
+      - run: bun install --frozen-lockfile
+      - run: bun run build
 
       - name: Create issue on failure
         if: failure()
         uses: actions/github-script@v7
         with:
           script: |
-            const { data: commit } = await github.rest.git.getCommit({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              commit_sha: context.sha,
-            });
-            
             await github.rest.issues.create({
               owner: context.repo.owner,
               repo: context.repo.repo,
               title: `🚨 Build broken on main — ${context.sha.substring(0, 7)}`,
-              body: [
-                `## Post-merge build failure`,
-                ``,
-                `**Commit**: ${context.sha}`,
-                `**Author**: ${commit.author.name}`,
-                `**Message**: ${commit.message.split('\n')[0]}`,
-                `**Run**: ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
-                ``,
-                `This commit broke the build on main. Immediate fix required.`,
-              ].join('\n'),
-              labels: ['bug', 'priority:critical'],
+              body: `Post-merge build failure.\n\nCommit: ${context.sha}\nRun: ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
+              labels: ['bug', 'priority/P0', 'pipeline/discovered', 'source/sentinel'],
             });
 ```
 
-This auto-creates a critical issue that the Coordinator will pick up on its next cycle.
+This auto-creates a P0 issue that the Coordinator picks up immediately.
+
+## Common CI Failures from AI Agents
+
+### 1. Missing Dependencies (pnpm/bun strict mode)
+
+```
+error: Module not found: @some/package
+```
+
+Agents use transitive dependencies (installed by something else) that aren't in `package.json`. Works with npm's hoisting, fails with strict mode.
+
+**Fix:** Agent prompt: "If you import a package, verify it's in `package.json`. If not, add it."
+
+### 2. Import Path Case Sensitivity
+
+```
+Module not found: Can't resolve './components/loginPage'
+# File is: ./components/LoginPage.tsx
+```
+
+macOS is case-insensitive, Linux (CI) is case-sensitive. Agents running on macOS sandboxes don't notice the mismatch.
+
+### 3. Environment Variable Assumptions
+
+```
+TypeError: Cannot read properties of undefined (reading 'split')
+# process.env.DATABASE_URL.split('/')
+```
+
+Agents assume env vars exist. Build step doesn't have them.
+
+**Fix:** Provide dummy env vars in CI, or use `zod` to validate with defaults.
+
+### 4. Build-Only Runtime Errors
+
+```
+Error: useAuth must be used within an AuthProvider
+```
+
+TypeScript compiles fine. The error only appears at runtime. CI won't catch it without integration tests.
+
+**Fix:** Add basic render tests for components using context providers.
+
+## Cost Control
+
+For private repos, Actions minutes cost money:
+
+```yaml
+on:
+  pull_request:
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - '.github/ISSUE_TEMPLATE/**'
+```
+
+- Skip CI for docs-only changes
+- Use `concurrency` + `cancel-in-progress` to kill stale runs
+- Cache `node_modules` aggressively
+- Set `timeout-minutes` to prevent runaway builds

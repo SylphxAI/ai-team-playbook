@@ -1,250 +1,255 @@
 # Lessons Learned — A Living Document
 
 > Every lesson here cost us time, tokens, or production uptime.
-> Read this before you start. Bookmark it. Come back when something breaks.
+> This is the most important document in the playbook.
+> Read it before you start. Come back when something breaks.
 
 ---
 
-## 1. No CI Gate = Broken Code Merges Freely
+## 1. `strict: true` Kills Throughput
 
-**What happened**: We started the project without branch protection. The Coordinator had merge permissions. In the first 24 hours, 3 PRs merged with TypeScript errors. Production went down.
+**What happened:** With `strict: true` branch protection and 17 queued PRs, each PR took ~20 minutes (rebase → CI → merge). Sequential processing: 17 × 20 min = 5.6 hours to clear the queue.
 
-**The error we kept seeing**:
-```
-Type error: Property 'userId' does not exist on type 'Session | null'.
-```
+**The fix:** Changed to `strict: false`. Batch-merged 14 PRs in 2 minutes. Sentinel verified production stayed healthy.
 
-The agent assumed `session` was always defined. TypeScript caught it — but nobody required the build to pass before merging.
+**Research:** No major OSS project (Kubernetes, React, Next.js, Rust, GitHub) uses `strict: true` at scale. See [Merge Safety](03-merge-safety.md).
 
-**Fix**: Branch protection with required status checks. Day 1. Not day 2. Day 1.
-
-**Rule**: If the CI isn't set up, no agent gets write access. Period.
+**Rule:** Use `strict: false` + Sentinel post-merge monitoring. Reserve `strict: true` for small teams with < 5 PRs/day.
 
 ---
 
-## 2. Coordinator Merging Stale/Duplicate PRs
+## 2. Lock Mechanisms Are an Anti-Pattern
 
-**What happened**: Two Builders independently fixed the same issue. Both created PRs. The Coordinator saw both were approved and merged them sequentially. The second merge introduced a conflict that somehow passed CI (the files didn't overlap, but the logic conflicted).
+**What happened:** Our initial coordinator design had a lock step (acquire lease via GitHub issue, 10-min TTL). When the coordinator crashed, everything stopped for 10 minutes. When TTL was too short, overlapping runs happened anyway.
 
-**Real scenario**:
-```
-PR #45: Adds UserProfile component with inline styles
-PR #47: Adds UserProfile component with Tailwind classes
-Both "fix" issue #40: "Create user profile page"
-```
+**The fix:** Removed the lock entirely. Made every operation idempotent:
+- Assigning already-assigned issue → skip
+- Spawning when session exists → skip
+- Merging already-merged PR → skip
+- Adding existing label → no-op
 
-Both passed CI because they were tested independently. When both merged, we had two `UserProfile.tsx` files — actually one file with conflicting implementations smushed together.
-
-**Fix**: 
-- Pre-merge duplicate detection (see [Merge Safety](03-merge-safety.md))
-- The Coordinator must check if another PR already addresses the same issue
-- Close superseded PRs with a comment
+**Rule:** Don't prevent duplicate operations. Make duplicate operations harmless.
 
 ---
 
-## 3. Vercel Ignore Build Step Inversion
+## 3. Triage Gate Prevents 30-50% of Wasted Work
 
-**What happened**: We configured Vercel's "Ignored Build Step" to skip preview deploys on non-main branches. The exit codes are backwards:
+**What happened:** Without triage, the Scout created issues like "Rename variable from `x` to `count`" and Builders spent hours implementing cosmetic changes. The review rejection rate was 60%+ because the work shouldn't have started.
+
+**The fix:** Added Triage agent between Scout and Builder. Every issue is evaluated on: value, scope, feasibility, size, duplication, risk. Target rejection rate: 30-50%.
+
+**Result:** Builder output quality improved dramatically. Review first-pass rate went from ~40% to 70%+.
+
+**Rule:** If you're not rejecting 30-50% of discoveries, your Scout is either too conservative (not finding enough) or your Triage is too permissive (approving junk).
+
+---
+
+## 4. Auto-Merge Doesn't Work with `strict: true`
+
+**What happened:** With `strict: true`, merging PR #1 makes PRs #2-#10 stale. They all need to rebase and re-run CI. Auto-merge can't handle this — it just waits indefinitely.
+
+**Compounding factor:** Vercel stuck `pending` statuses also block auto-merge. So even with `strict: false`, auto-merge was unreliable.
+
+**The fix:** Direct merge via `gh pr merge --squash --delete-branch`, called by the Merger agent after verifying CI and review status.
+
+**Rule:** Don't rely on GitHub auto-merge for autonomous pipelines. Use direct merge with explicit checks.
+
+---
+
+## 5. Vercel Stuck Pending Statuses Block Merges
+
+**What happened:** Vercel sometimes leaves commit statuses in `pending` forever. These show as pending checks on PRs, blocking both auto-merge and manual merge (if "all checks must pass" is enabled).
+
+**The fix:** Override stuck statuses:
 
 ```bash
-# What we wrote (WRONG):
-if [ "$VERCEL_GIT_COMMIT_REF" != "main" ]; then
-  exit 1  # We thought: 1 = "yes, ignore this build"
-fi
-exit 0    # We thought: 0 = "proceed with build"
-
-# What Vercel actually does:
-# exit 0 = SKIP the build
-# exit 1 = PROCEED with the build
+gh api repos/{owner}/{repo}/statuses/{SHA} \
+  -f state=success -f context=Vercel \
+  -f description="Override stale pending"
 ```
 
-**Result**: Production deploys were skipped. Preview deploys were running. For an entire week.
+**Gotcha:** GitHub App tokens can't override third-party statuses. Must use a personal account.
 
-**The fix**:
-```bash
-# Correct:
-if [ "$VERCEL_GIT_COMMIT_REF" != "main" ]; then
-  echo "Skipping build for non-main branch"
-  exit 0  # 0 = skip
-fi
-echo "Building for main"
-exit 1  # 1 = proceed
-```
-
-**Rule**: Always verify deploy behavior by pushing a trivial change and checking the Vercel dashboard. Don't trust the logic.
+**Rule:** Don't make Vercel a required check. Monitor its statuses and override when stuck.
 
 ---
 
-## 4. Component Outside Provider = Runtime 500
+## 6. GitHub `reviewDecision` Stays `CHANGES_REQUESTED` After New Approvals
 
-**What happened**: A Builder added `MobileTabBar` to the root layout. The component uses `useAuth()` to show the user's avatar. But it was rendered OUTSIDE the `AuthProvider` boundary.
+**What happened:** Reviewer requested changes on a PR. Fixer addressed feedback. Reviewer approved. But `gh pr view --json reviewDecision` still showed `CHANGES_REQUESTED`.
 
-```tsx
-// app/layout.tsx — THE BUG
-export default function RootLayout({ children }) {
-  return (
-    <html>
-      <body>
-        <AuthProvider>
-          {children}
-        </AuthProvider>
-        <MobileTabBar />  {/* ← OUTSIDE AuthProvider */}
-      </body>
-    </html>
-  );
-}
-```
+**Root cause:** GitHub doesn't automatically dismiss old reviews when a new one is submitted. The `reviewDecision` field reflects ALL reviews, not just the latest.
 
-**The insidious part**: This builds fine. TypeScript doesn't complain. ESLint doesn't catch it. The error only appears at runtime:
-
-```
-Error: useAuth must be used within an AuthProvider
-    at MobileTabBar (MobileTabBar.tsx:12)
-    at RootLayout (layout.tsx:8)
-```
-
-**Result**: 500 error on every page load on mobile. Desktop was fine (MobileTabBar has a `hidden md:` class, but the hook still runs).
-
-**Fix**: Move the component inside the provider. Add a render test that catches context errors:
-
-```typescript
-// __tests__/layout.test.tsx
-test('root layout renders without errors', () => {
-  expect(() => render(<RootLayout>test</RootLayout>)).not.toThrow();
-});
-```
-
----
-
-## 5. Transitive Dependencies in pnpm Strict Mode
-
-**What happened**: A Builder used `@hono/zod-validator` in an API route. It worked locally because `@hono/zod-validator` was a transitive dependency of another package. But pnpm's strict mode doesn't hoist transitive deps.
-
-**CI error**:
-```
- ERR_PNPM_PEER_DEP_ISSUES  Unmet peer dependencies
-
-error: Cannot find module '@hono/zod-validator'
-  Require stack:
-  - /app/src/api/routes/auth.ts
-```
-
-**The pattern**: This happens constantly with AI agents. They see an import in another file, assume it's available, and use it. With npm's hoisted `node_modules`, it works. With pnpm, it doesn't.
-
-**Fix**: 
-```bash
-pnpm add @hono/zod-validator
-```
-
-And add to agent prompts: "If you import a package, verify it exists in `package.json` under `dependencies` or `devDependencies`. If not, run `pnpm add <package>` and commit the updated `package.json` and `pnpm-lock.yaml`."
-
----
-
-## 6. Coordinator Creates Rogue Cron Jobs
-
-**What happened**: The Coordinator prompt said "keep the project healthy." It interpreted this as:
-1. Create a cron job to check CI status every 5 minutes
-2. Create a cron job to review stale PRs every 10 minutes
-3. Create a cron job to audit the codebase every 30 minutes
-
-Each cron job spawned sub-agents. Each sub-agent consumed API tokens. We burned through $50 in API costs in 4 hours before noticing.
-
-**The actual cron jobs it created**:
-```
-*/5 * * * *  — "Check all PR statuses and comment updates"
-*/10 * * * * — "Review any PRs without reviews"
-*/30 * * * * — "Full codebase audit for issues"
-```
-
-**Fix**: Add to Coordinator prompt, explicitly:
-```
-## PROHIBITED ACTIONS
-- Do NOT create cron jobs
-- Do NOT create scheduled tasks
-- Do NOT create any persistent background processes
-- Do NOT modify system configuration
-```
-
-**Rule**: AI agents interpret vague instructions creatively. Be explicit about what they MUST NOT do, not just what they should do.
-
----
-
-## 7. `cron update enabled:false` Doesn't Stop In-Flight Runs
-
-**What happened**: After discovering the rogue cron jobs (lesson #6), we disabled them:
+**The fix:** Explicitly dismiss stale reviews before approving:
 
 ```bash
-openclaw cron update --id abc123 --enabled false
+# Get stale CHANGES_REQUESTED review IDs
+gh api repos/{owner}/{repo}/pulls/{N}/reviews \
+  --jq '.[] | select(.state == "CHANGES_REQUESTED") | .id'
+
+# Dismiss each
+gh api -X PUT repos/{owner}/{repo}/pulls/{N}/reviews/{ID}/dismissals \
+  -f message="Superseded by re-review" -f event="DISMISS"
 ```
 
-But the cron job that was already running continued to execute. Disabling a cron job prevents FUTURE runs — it doesn't stop the current one.
+**Rule:** When re-reviewing a PR, always dismiss stale reviews first. Otherwise the PR looks permanently rejected.
 
-**Fix**: Kill the running process separately:
+---
+
+## 7. Agent PRs Get Rejected for Predictable Reasons
+
+**Research (arXiv 2602.04226):** The top reasons AI-generated PRs get rejected:
+
+1. **Too large / hard to review** (30%+ of rejections)
+2. **No added value** — cosmetic changes, unnecessary refactoring
+3. **Increased complexity** — over-engineering simple fixes
+4. **Context/environment limitations** — agent doesn't understand project conventions
+5. **Distrust of AI-generated code** — humans skeptical by default
+
+**Our mitigations:**
+- Triage gate rejects low-value work before building starts
+- Size labels enforce < 500 line PRs
+- Builder prompt: "Follow existing patterns EXACTLY. Don't refactor unrelated code."
+- Learning log captures rejection patterns, fed back into agent prompts
+
+**Rule:** Train your agents on YOUR conventions. Generic prompts produce generic (rejected) code.
+
+---
+
+## 8. Post-Merge Sentinel Replaces Strict Mode Safety
+
+**What happened:** With `strict: false`, we theoretically accept the risk of semantic merge conflicts (two PRs that individually pass CI but break when combined).
+
+**In practice:** After 30 PRs merged on launch day with `strict: false`, Sentinel detected zero production issues. Small, focused PRs (enforced by our pipeline) rarely conflict semantically.
+
+**The math:**
+- `strict: true`: Prevents 100% of semantic conflicts, but costs 10× in throughput
+- `strict: false` + Sentinel: Catches ~99% within 5 minutes, costs nothing in throughput
+
+**Rule:** Post-merge monitoring is cheaper than pre-merge serialization.
+
+---
+
+## 9. The PR #381 Disaster — Never Let Coordinator Merge
+
+**What happened:**
+1. Coordinator had direct merge API access
+2. Reviewer approved PR #381
+3. CI was still running
+4. Coordinator saw "approved" → called merge API
+5. PR merged with a TypeScript error
+6. Three more PRs built on broken `main`
+7. Production broke for 4 hours
+
+**The fix:** Remove merge capability from Coordinator entirely. Merger agent (or auto-merge) verifies ALL checks before merging.
+
+**Rule:** The thing that decides "this should merge" should not be the thing that merges. Separate the decision from the action.
+
+---
+
+## 10. Scout Needs Duplicate Detection
+
+**What happened:** Scout discovered "Fix mobile tab bar layout" three times in one day. Three Builders implemented three slightly different fixes. Two PRs conflicted.
+
+**The fix:** Scout checks both open AND recently closed issues before creating new ones:
+
 ```bash
-# Disable future runs
-openclaw cron update --id abc123 --enabled false
-
-# Kill the currently running instance
-openclaw cron kill --id abc123
+gh issue list --state open --json number,title --limit 100
+gh issue list --state closed --label "pipeline/merged" --json number,title --limit 50
 ```
 
-**Rule**: "Disabled" ≠ "stopped." Always check for in-flight runs.
+Plus: Triage agent as second line of defense rejects duplicates.
+
+**Rule:** Duplicate detection at two levels: Scout (creation) and Triage (approval).
 
 ---
 
-## 8. Sub-Agents Hit 200k Token Limit on Raw HTML
+## 11. Learning Log Captures Rejection Patterns
 
-**What happened**: A sub-agent was tasked with "research the competition." It fetched a competitor's website with `curl`, which returned 180kb of raw HTML. The agent tried to process this, hit the 200k token context limit, and crashed.
+**What happened:** The same types of PRs kept getting rejected: cosmetic changes, oversized refactors, out-of-scope features. The agents didn't learn from previous rejections.
 
-**The command that caused it**:
-```bash
-curl -s https://competitor-website.com | head -c 500000
-```
+**The fix:** `docs/pipeline-learning-log.md` in the repo captures:
+- Triage rejection patterns (cosmetic changes, out-of-scope, duplicates)
+- Review rejection patterns (missing error handling, breaking tests)
+- Merge failures (which changes broke production)
 
-That's 500kb of HTML → roughly 125k tokens. Add the system prompt and conversation history, and you're over the limit.
+Each agent gets the relevant sections in their prompt:
+- **Scout** → triage rejection patterns (avoid creating what will be rejected)
+- **Builder** → review rejection patterns (avoid common mistakes)
+- **Reviewer** → merge failure patterns (extra scrutiny on risky areas)
 
-**Fix**: 
-- Use structured search tools (Tavily) instead of raw `curl`
-- If you must fetch HTML, extract text first: `curl -s URL | html2text | head -100`
-- Set explicit limits in agent prompts: "Never fetch more than 10kb of raw text from any URL"
-
----
-
-## 9. Single Coordinator Blocks All Channels When Busy
-
-**What happened**: The Coordinator was handling a user's Telegram message (complex question about project status). While it was processing that message (~45 seconds), three other events queued up:
-- A PR was ready for review
-- A Builder finished and needed the next assignment
-- A stale PR needed closing
-
-Everything waited 45 seconds for the Coordinator to finish the Telegram response.
-
-**Fix**: Separate the human-facing agent from the coordination agent. The Coordinator handles infrastructure. A separate agent handles user messages and delegates to the Coordinator.
-
-**Rule**: The human-facing agent should NEVER do work itself. It should always delegate, then respond to the human while work happens asynchronously.
+**Rule:** Log rejections. Feed them back. Agents can only learn from written history.
 
 ---
 
-## 10. Always Delegate — Human-Facing Agent Must Never Do Work
+## 12. Production Broke Because Agents Merged Conflicting PRs
 
-**What happened**: A user asked "Can you fix the login bug?" The main agent (which was also the Coordinator) started debugging the login bug directly. For 3 minutes, it was deep in code analysis.
+**What happened (PR #381 era):** Multiple PRs merged to `main` in sequence without CI re-running between merges (before we understood `strict` mode). The combined changes broke the build.
 
-During those 3 minutes:
-- Two approved PRs waited for auto-merge (fine, that's async)
-- Another user sent a message and got no response
-- A stale PR cleanup cycle was skipped
-- The agent hit its token limit halfway through the fix and had to give up
+**What we learned:** The solution is NOT `strict: true` (too slow). The solution is:
+1. `strict: false` for throughput
+2. Sentinel checks production after every merge batch
+3. Small, focused PRs minimize conflict surface area
+4. Post-merge CI on `main` catches build breakage immediately
 
-**Fix**: The main agent's response should be:
+**Rule:** Always verify build BEFORE merge (CI on PR) AND AFTER merge (post-merge verification on `main`).
+
+---
+
+## 13. Coordinator Creates Rogue Cron Jobs
+
+**What happened:** Coordinator prompt said "keep the project healthy." It created:
+- Cron job every 5 min: check CI status
+- Cron job every 10 min: review stale PRs
+- Cron job every 30 min: audit codebase
+
+Each job spawned sub-agents. $50 in API costs in 4 hours.
+
+**The fix:** Explicit prohibitions in coordinator prompt:
 ```
-"On it — I'm assigning this to a Builder agent now."
-*spawns Builder sub-agent with the issue*
+🚫 NEVER create cron jobs
+🚫 NEVER create scheduled tasks
+🚫 NEVER create persistent background processes
+```
+
+**Rule:** AI agents interpret vague instructions creatively. Be explicit about what they MUST NOT do.
+
+---
+
+## 14. Disabling a Cron Job Doesn't Stop In-Flight Runs
+
+**What happened:** After discovering rogue cron jobs, we disabled them. But the currently running instance continued executing.
+
+**The fix:** Disable future runs AND kill the current instance separately.
+
+**Rule:** "Disabled" ≠ "stopped." Check for in-flight work.
+
+---
+
+## 15. Sub-Agents Hit Token Limits on Raw HTML
+
+**What happened:** Agent tasked with "research competition" fetched a website with `curl` → 180KB raw HTML → 125K tokens → context limit exceeded → crash.
+
+**The fix:** Use structured search tools (not raw HTTP), extract text before processing, set explicit size limits in prompts.
+
+**Rule:** Never fetch more than 10KB of raw text in an agent context.
+
+---
+
+## 16. Human-Facing Agent Must Never Do Work Itself
+
+**What happened:** User asked "Can you fix the login bug?" The main agent started debugging directly. For 3 minutes, all other sessions were blocked. It hit the token limit halfway and had to give up.
+
+**The fix:** The main agent always delegates:
+```
+"On it — assigning to a Builder now."
+→ spawns sub-agent
 "Builder is working on it. I'll let you know when the PR is ready."
 ```
 
 Total time: 5 seconds. Then back to being responsive.
 
-**Rule**: If it takes more than 10 seconds, delegate it.
+**Rule:** If it takes more than 10 seconds, delegate it. The human-facing agent is a dispatcher, not a worker.
 
 ---
 
@@ -255,9 +260,9 @@ Every one of these lessons was learned the hard way. We didn't write them down i
 Now we have this document. When a new failure happens:
 
 1. Write down what happened (specific, not vague)
-2. Write down the actual error message or behavior
+2. Write down the actual error message
 3. Write down the fix
 4. Add it to this document
 5. Update agent prompts to prevent recurrence
 
-The playbook is only as good as its maintenance. Keep it alive.
+**The playbook is only as good as its maintenance.**

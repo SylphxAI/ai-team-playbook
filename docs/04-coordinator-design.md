@@ -1,237 +1,253 @@
-# Coordinator Architecture
+# Coordinator Design — The Reconciliation Loop
 
-> The Coordinator is the most important agent and the most dangerous one.
-> Keep it lightweight. Keep it dumb. The moment it gets clever, things break.
+> The Coordinator is a Kubernetes controller, not a task scheduler.
+> It reads state, reconciles, and spawns agents. It never writes code.
+> Every step is idempotent. No locks needed. Overlapping runs are harmless.
 
-## Core Principle: The Coordinator Is a Dispatcher
+## Core Principle: Reconciliation, Not Orchestration
 
-The Coordinator should do exactly three things:
-
-1. **Spawn agents** — assign work to Builders, Reviewers, Fixers
-2. **Heal stale work** — close abandoned PRs, reassign stuck issues
-3. **Find new work** — run audit cycles to discover issues
-
-That's it. Not code. Not merge. Not review. Not deploy. Dispatch.
-
-## Why Single Coordinator
-
-Running two coordinators causes:
-- Duplicate agent spawns (two Builders for the same issue)
-- Conflicting PR closures (both try to clean up the same stale PR)
-- Race conditions in slot management
-- Double the API rate limit consumption
-
-One coordinator is a bottleneck by design. If it's too slow, make it faster — don't add another.
-
-## Keeping It Lightweight
-
-The Coordinator's token budget is precious. If it spends 100k tokens reading a huge codebase, it has less capacity for coordination decisions.
-
-**What bloats the Coordinator:**
-- Reading full file contents (it doesn't need to — that's the Builder's job)
-- Reviewing PR diffs (that's the Reviewer's job)
-- Debugging build failures (that's the Fixer's job)
-- Parsing raw HTML from web fetches (200k tokens gone in one call)
-
-**What the Coordinator should read:**
-- Issue titles and labels (not full bodies unless needed)
-- PR status (open/closed/merged, CI status, review status)
-- Agent status (running/completed/failed)
-- File lists (not file contents)
-
-## Cron-Based vs Event-Driven
-
-### Cron-Based (what we use)
-
+Traditional orchestrators:
 ```
-Every 15 minutes:
-  1. Check for new issues → spawn Builders
-  2. Check for PRs needing review → spawn Reviewers
-  3. Check for review feedback → spawn Fixers
-  4. Check for stale PRs → close or reassign
-  5. Check for merge conflicts → spawn Rebasers
+❌ Step 1: Do X
+❌ Step 2: Wait for X to finish
+❌ Step 3: Do Y based on X's result
+❌ Step 4: ...
 ```
 
-**Pros:**
-- Simple to implement
-- Predictable resource usage
-- Easy to debug (check the cron logs)
-
-**Cons:**
-- 0-15 minute delay between events and responses
-- Wasted cycles when nothing changed
-
-### Event-Driven (alternative)
-
+Reconciliation loop:
 ```
-GitHub webhook → "PR opened" → spawn Reviewer
-GitHub webhook → "review submitted" → spawn Fixer (if changes requested)
-GitHub webhook → "issue opened" → spawn Builder
+✅ Read current state
+✅ Compare to desired state
+✅ Take actions to close the gap
+✅ Repeat (every 5 minutes)
 ```
 
-**Pros:**
-- Instant response to events
-- No wasted cycles
+The Coordinator doesn't remember what it did last cycle. It doesn't track state between runs. Every cycle, it reads ALL state from GitHub and decides what needs to happen RIGHT NOW.
 
-**Cons:**
-- Requires webhook infrastructure
-- Harder to debug
-- Can be overwhelmed by event storms (e.g., bulk issue creation)
+## The 11-Step Algorithm
 
-**Our recommendation:** Start with cron. Move to event-driven when latency matters.
+Every coordinator cycle executes these steps in order:
 
-## Slot Management
+### Step 1 — Inventory
 
-Agents cost money (API calls, compute). You need limits:
+Gather ALL pipeline state from GitHub:
 
-```typescript
-interface SlotConfig {
-  maxBuilders: number;     // e.g., 3
-  maxReviewers: number;    // e.g., 2
-  maxFixers: number;       // e.g., 2
-  maxRebasers: number;     // e.g., 1
-}
+```bash
+# All open issues by pipeline state
+gh issue list --label "pipeline/discovered" --json number,title,labels,assignees,createdAt
+gh issue list --label "pipeline/approved" --json number,title,labels,assignees,createdAt
+gh issue list --label "pipeline/in-progress" --json number,title,labels,assignees,createdAt
+gh issue list --label "pipeline/pr-open" --json number,title,labels,assignees,createdAt
 
-async function canSpawnBuilder(): Promise<boolean> {
-  const activeBuilders = await getActiveAgents('builder');
-  return activeBuilders.length < config.maxBuilders;
-}
+# All open PRs with review and CI status
+gh pr list --state open --json number,title,labels,reviewDecision,mergeable,statusCheckRollup
+
+# Recently merged PRs (for Sentinel)
+gh pr list --state merged --json number,title,mergedAt --limit 10
+
+# Active sub-agent sessions (for duplicate prevention)
+# Check running sessions, filter by label prefix
 ```
 
-**Why limit slots?**
-- 5 Builders running simultaneously = 5 PRs that might conflict
-- Each agent consumes API tokens ($$$)
-- Too many parallel PRs overwhelms the Reviewer
-- CI queues get long with 10+ concurrent PRs
+Build a mental model of the entire pipeline before proceeding.
 
-**Recommended starting slots:**
-- 2-3 Builders
-- 1 Reviewer (it can handle multiple PRs sequentially)
-- 1 Fixer
-- 1 Rebaser
+### Step 2 — Timeouts
+
+Heal stuck work:
+
+| Condition | Action |
+|-----------|--------|
+| `pipeline/in-progress` + no PR + no active builder for >2h | Re-queue as `pipeline/approved` |
+| `pipeline/pr-open` + no review for >4h | Flag as urgent |
+| `pipeline/discovered` + older than 24h | Auto-reject (stale) |
+| `pipeline/review-failed` + no fix for >4h | Close PR, re-queue issue |
+
+### Step 3 — Sentinel
+
+Check production health after recent merges:
+
+```bash
+HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" https://your-app.com)
+```
+
+- **HTTP 200:** Comment "✅ post-merge verified" on recently merged PRs
+- **HTTP != 200:** Create P0 issue, identify likely culprit merge
+
+### Step 4 — Merge
+
+Find PRs ready to merge: `pipeline/review-passed` + CI green + no conflicts.
+
+Sort by priority (P0 first). **Merge ALL ready PRs in the same cycle** (batch merge).
+
+Handle Vercel stuck statuses: if pending >10 min, override with success.
+
+### Step 5 — Review
+
+Find PRs needing review: `pipeline/pr-open` + CI green + no review.
+
+For each, check if a reviewer session already exists. If not, spawn one.
+
+### Step 6 — Fix
+
+Find PRs with failed reviews: `pipeline/review-failed` or `reviewDecision == CHANGES_REQUESTED`.
+
+Count previous fix attempts. If >= MAX_FIX_RETRIES (2), abandon the PR and re-queue the issue. Otherwise, spawn a Fixer.
+
+### Step 7 — Rebase
+
+Find PRs that are approved but have merge conflicts (`mergeable == CONFLICTING`).
+
+Spawn a Rebaser for each.
+
+### Step 8 — Build
+
+Find approved issues ready for work: `pipeline/approved` + no assignee.
+
+Check WIP limit. Sort by priority, then age (oldest first). Spawn Builders up to available slots.
+
+### Step 9 — Triage
+
+Find discovered issues: `pipeline/discovered`.
+
+Spawn a Triage agent for each that doesn't already have one running.
+
+### Step 10 — Scout
+
+Only if backlog is low: `count(approved + discovered) < BACKLOG_THRESHOLD`.
+
+Spawn a Scout to discover new issues.
+
+### Step 11 — Status
+
+Update the metrics dashboard (pinned GitHub issue) with current pipeline state. Print a console summary.
+
+If nothing was done this cycle → print status and exit. Don't invent work.
+
+## Why No Locks
+
+The initial design included a lock step (acquire/release via a GitHub issue). We removed it. Here's why:
+
+### Every Step Is Already Idempotent
+
+| Operation | Idempotent? | Why |
+|-----------|-------------|-----|
+| Assigning an issue | Yes | Already assigned → skip |
+| Spawning a builder | Yes | Session already exists → skip |
+| Merging a PR | Yes | Already merged → skip |
+| Adding a label | Yes | GitHub is a no-op if label exists |
+| Closing an issue | Yes | Already closed → skip |
+| Creating a P0 issue | Yes | Check for existing P0 first |
+
+### What Happens If Two Cycles Overlap?
+
+```
+Cycle A (5:00): Reads state, sees PR #100 ready to merge
+Cycle B (5:01): Reads state, sees PR #100 ready to merge
+
+Cycle A: Merges PR #100 ✅
+Cycle B: Tries to merge PR #100 → already merged → skips ✅
+```
+
+Both cycles produce the same result. No data corruption. No duplicate work.
+
+### The Lock Anti-Pattern
+
+```
+❌ Acquire lock → lock holder crashes → 10 min timeout → dead time
+❌ Lock TTL too short → overlapping runs anyway
+❌ Lock TTL too long → artificial delays
+❌ Lock contention → reduced throughput
+```
+
+Locks solve a problem that doesn't exist when operations are idempotent.
+
+## Configuration
+
+```
+WIP_LIMIT: 10           # Max concurrent in-progress issues
+BACKLOG_THRESHOLD: 15    # Scout runs when backlog < this
+MAX_FIX_RETRIES: 2       # Max fix attempts before abandoning PR
+CRON_INTERVAL: 5 min     # Coordinator cycle frequency
+```
+
+### Tuning WIP Limit
+
+| WIP | Builders | Theoretical Max | Notes |
+|-----|----------|-----------------|-------|
+| 3 | 3 | ~12 PRs/hour | Conservative, good for starting |
+| 5 | 5 | ~20 PRs/hour | Moderate |
+| 10 | 10 | ~30 PRs/hour | Our current setting |
+
+Formula: `PRs/hour ≈ WIP_LIMIT × completions_per_builder_per_hour`
+
+Most builders complete 2-4 PRs/hour depending on issue complexity.
+
+## Priority Scoring
+
+Work is always ordered by:
+1. **Priority**: P0 (1000 pts) > P1 (100 pts) > P2 (10 pts)
+2. **Age**: +5 pts per day (prevents starvation)
+3. **Size**: -1 pt per size tier (slight preference for smaller work)
+
+```
+score = priority_weight + (age_days × 5) - size_penalty
+```
 
 ## Duplicate Prevention
 
-Before spawning a Builder for issue #42, check:
+Before spawning ANY agent, the Coordinator checks:
 
-```typescript
-async function shouldSpawnBuilder(issueNumber: number): Promise<boolean> {
-  // 1. Is there already an open PR for this issue?
-  const existingPRs = await findPRsForIssue(issueNumber);
-  if (existingPRs.length > 0) return false;
+1. **Is there already an active session for this work?** (e.g., `viral-build-issue42`)
+2. **Is there already a PR for this issue?**
+3. **Is the issue already assigned?**
+4. **Is the issue already closed?**
+5. **Do we have available WIP slots?**
 
-  // 2. Is there already a Builder working on this issue?
-  const activeBuilders = await getActiveAgents('builder');
-  const alreadyAssigned = activeBuilders.some(a => a.issueNumber === issueNumber);
-  if (alreadyAssigned) return false;
+If any check fails → skip.
 
-  // 3. Is the issue already closed?
-  const issue = await gh.issues.get(issueNumber);
-  if (issue.state === 'closed') return false;
+### Stale Session Detection
 
-  // 4. Do we have available slots?
-  if (activeBuilders.length >= config.maxBuilders) return false;
+A session is "stale" if it exists but the work hasn't progressed:
+- Builder session exists but no PR created after 30 min
+- Fixer session exists but PR still has `CHANGES_REQUESTED`
+- Rebaser session exists but PR is still `CONFLICTING`
 
-  return true;
-}
-```
-
-Without these checks, the Coordinator will happily spawn 3 Builders for the same issue on consecutive cron cycles.
-
-## File-Based Prompt Pattern
-
-Don't hardcode agent prompts in your Coordinator code. Store them in files:
-
-```
-prompts/
-  builder.md      — system prompt for Builder agents
-  reviewer.md     — system prompt for Reviewer agents
-  fixer.md        — system prompt for Fixer agents
-  coordinator.md  — system prompt for the Coordinator itself
-```
-
-**Why files?**
-- Edit prompts without redeploying the Coordinator
-- Version control on prompts (git blame shows when/why a prompt changed)
-- Easy A/B testing (swap prompt files)
-- Agents can read their own prompts at startup
-
-**Prompt structure:**
-
-```markdown
-# Builder Agent Prompt
-
-## Role
-You are a Builder agent. Your job is to implement a single GitHub issue.
-
-## Rules
-1. Create a branch named `feat/issue-{number}-{description}`
-2. Implement ONLY what the issue describes
-3. Run `pnpm build` before pushing
-4. Run `pnpm lint` before pushing
-5. Open a PR referencing the issue with `Closes #{number}`
-6. Do NOT review your own code
-7. Do NOT merge the PR
-8. Do NOT pick up additional work
-
-## Context
-- Repository: {repo}
-- Issue: #{issue_number}
-- Issue title: {issue_title}
-- Issue body: {issue_body}
-
-## Files you may need to reference
-{relevant_file_list}
-```
+For stale sessions: ignore them in duplicate checks and spawn fresh agents with incremented suffixes (`fix2-PR42`, `rebase2-PR42`).
 
 ## Coordinator Anti-Patterns
 
 ### ❌ Coordinator reviews code
-"Let me just quickly check if this PR looks right before spawning a reviewer..."
-No. The Coordinator doesn't have the context to review code. It will approve bad PRs.
+It doesn't have the context. It will approve bad PRs. That's the Reviewer's job.
 
-### ❌ Coordinator merges PRs
-"The PR is approved and CI passed, let me merge it..."
-No. Auto-merge handles this. The Coordinator merging introduces race conditions.
+### ❌ Coordinator merges directly
+Use the Merger role (or auto-merge). The Coordinator shouldn't call merge APIs.
 
 ### ❌ Coordinator creates cron jobs
-We had an incident where the Coordinator's prompt said "ensure the project stays healthy" and it interpreted that as creating a cron job that ran every 5 minutes, consuming API tokens. Your prompt must explicitly say: "Do NOT create cron jobs, scheduled tasks, or any persistent processes."
+We had an incident where the Coordinator created 3 cron jobs that burned $50 in API tokens in 4 hours. Your prompt must say: "Do NOT create cron jobs, scheduled tasks, or any persistent processes."
 
 ### ❌ Coordinator reads raw HTML
-A Coordinator that fetches a web page to "understand the project context" can consume 200k tokens on a single HTML page. Always restrict it to reading structured data (JSON, issue bodies, PR metadata).
+Fetching a web page can consume 200k tokens. Restrict to structured data only.
 
 ### ❌ Coordinator does work when busy
-If the Coordinator is handling a user message and simultaneously trying to coordinate agents, it blocks both. The human-facing agent should delegate ALL work — never implement anything itself.
+If handling a user message while coordinating, both block. Separate human-facing agent from coordination.
 
-## Example Coordinator Loop
+## Error Handling
 
-```python
-# Simplified coordinator loop
-async def coordinator_cycle():
-    # Phase 1: Assess current state
-    open_issues = await get_open_issues(labels=['ready'])
-    open_prs = await get_open_prs()
-    active_agents = await get_active_agents()
-    
-    # Phase 2: Handle PRs needing attention
-    for pr in open_prs:
-        if pr.needs_review and not has_active_reviewer(pr):
-            await spawn_reviewer(pr)
-        elif pr.has_changes_requested and not has_active_fixer(pr):
-            await spawn_fixer(pr)
-        elif pr.has_conflicts and not has_active_rebaser(pr):
-            await spawn_rebaser(pr)
-        elif pr.is_stale(hours=48):
-            await close_stale_pr(pr)
-    
-    # Phase 3: Assign new work
-    for issue in open_issues:
-        if can_spawn_builder() and should_spawn_builder(issue):
-            await spawn_builder(issue)
-    
-    # Phase 4: Audit (less frequently)
-    if should_run_audit():
-        await spawn_auditor()
-```
+If any step fails:
+1. Log the error clearly
+2. Continue to the next step (don't abort the whole cycle)
+3. Always reach Step 11 to output status
 
-This entire loop should complete in under 30 seconds. If it takes longer, the Coordinator is doing too much.
+If GitHub API is rate-limited:
+1. Skip non-essential steps (Scout, metrics update)
+2. Priority order: Merge > Review > Fix > Build > Triage > Scout
+
+## Human Override
+
+Humans can interact with the pipeline at any time:
+- Add `pipeline/approved` + priority label → skip triage
+- Add `source/human` label → mark as human-created
+- Close/reopen issues → override pipeline decisions
+- Comment with feedback → agents pick up on next cycle
+
+The coordinator respects human labels and never overrides them.

@@ -1,270 +1,190 @@
-# Database Migration Strategy
+# Migration Strategy — From Manual to Autonomous
 
-> Parallel agents and sequential migration files are fundamentally incompatible.
-> This document explains why and what to do about it.
+> Our journey: v1 (naive) → v2 (structured) → v3 (FSM + triage).
+> Each version fixed the failures of the previous one.
 
-## The Problem
+## The Three Versions
 
-Traditional migration tools use sequential numbering:
+### v1 — Naive (Day 1)
 
-```
-migrations/
-  0001_create_users.sql
-  0002_add_email_to_users.sql
-  0003_create_posts.sql
-  0004_add_published_to_posts.sql
-```
+**Architecture:** One coordinator, one builder, one reviewer. No labels. No FSM. The coordinator kept a mental model of what was happening and made decisions based on vibes.
 
-This works when one developer creates migrations sequentially. It breaks catastrophically with parallel AI agents:
+**What worked:**
+- PRs got opened and merged
+- Basic code was produced
 
-```
-Timeline:
-  t=0: main has migrations 0001-0003
-  t=1: Agent A branches, creates 0004_add_comments.sql
-  t=2: Agent B branches, creates 0004_add_likes.sql
-  t=3: Agent A's PR passes CI (tests against DB with 0001-0003 + 0004_comments)
-  t=4: Agent B's PR passes CI (tests against DB with 0001-0003 + 0004_likes)
-  t=5: Agent A merges → main has 0001-0004 (comments)
-  t=6: Agent B merges → CONFLICT: two files named 0004_*
-```
+**What broke:**
+- Coordinator merged PRs while CI was still running (PR #381 disaster)
+- No quality gate → Scout created junk issues, Builder implemented them
+- Duplicate PRs for the same issue (no dedup)
+- No timeout handling → stuck PRs stayed stuck forever
+- Coordinator did too much: coordinated + reviewed + sometimes coded
 
-Even if you avoid the naming conflict (Drizzle uses hashes), the migration runner might:
-- Apply them in the wrong order
-- Skip one because it thinks it was already applied
-- Apply both but in an order that violates foreign key constraints
+**Lessons:**
+- Never let the coordinator merge directly
+- Separate concerns: one agent, one job
+- You need a quality gate (triage) before building
 
-## Drizzle ORM Limitations
+### v2 — Structured (Week 1)
 
-Drizzle's `drizzle-kit generate` creates migration files with sequential numbering and a `_journal.json` that tracks order:
+**Architecture:** Coordinator + Builder + Reviewer + Fixer + Rebaser + Auditor (our original Scout). Added basic labels (`in-progress`, `ready`). Coordinator still ran on vibes but with better prompts.
 
-```json
-{
-  "entries": [
-    { "idx": 0, "when": 1707000000, "tag": "0000_initial" },
-    { "idx": 1, "when": 1707100000, "tag": "0001_add_users" },
-    { "idx": 2, "when": 1707200000, "tag": "0002_add_posts" }
-  ]
-}
-```
+**What worked:**
+- Role separation reduced conflicts
+- Basic label tracking improved visibility
+- Review cycle caught more bugs
+- Fixer addressed review feedback without re-creating PRs
 
-Two agents generating migrations will both create `idx: 3` entries. When merged, the journal has duplicate indices.
+**What broke:**
+- `strict: true` with auto-merge → cascading conflicts, PRs stuck for hours
+- Vercel pending statuses blocked auto-merge indefinitely
+- No triage → 30-50% of work was wasted on low-value issues
+- GitHub `reviewDecision` stayed `CHANGES_REQUESTED` even after new approvals
+- Coordinator overlapping runs caused duplicate agent spawns
+- No learning loop → same mistakes repeated
 
-**Drizzle's `migrate()` function**:
-- Reads the journal
-- Compares against the `__drizzle_migrations` table
-- Applies missing migrations in order
+**Lessons:**
+- `strict: true` kills throughput at scale
+- Triage is the #1 missing piece
+- Auto-merge doesn't work with `strict: true` (cascading conflicts)
+- Need explicit FSM states, not ad-hoc labels
+- GitHub API has quirks you learn the hard way
 
-With duplicate indices, behavior is undefined. We've seen it:
-- Skip the second migration entirely
-- Apply both but mark only one as applied
-- Throw an error and halt the application on startup
+### v3 — FSM + Triage (Current)
 
-## Solution 1: Timestamp-Based Naming
+**Architecture:** 6 specialized roles (Scout, Triage, Builder, Reviewer, Merger, Sentinel). GitHub labels as FSM state. Reconciliation loop (Kubernetes controller pattern). No locks. `strict: false`.
 
-Instead of sequential numbers, use timestamps:
+**What works:**
+- 30 PRs merged on launch day
+- 14 PRs batch-merged in 2 minutes
+- Triage prevents 30-50% of wasted work
+- Sentinel catches post-merge issues
+- Learning loop improves agents over time
+- Idempotent operations → no duplicate work even with overlapping runs
 
-```
-migrations/
-  20260210_120000_create_users.sql
-  20260210_143000_add_email.sql
-  20260211_091500_create_posts.sql
-  20260212_100000_add_comments.sql   ← Agent A
-  20260212_100100_add_likes.sql      ← Agent B (different timestamp)
-```
+**Configuration:**
+- WIP limit: 10
+- Backlog threshold: 15
+- Max fix retries: 2
+- Cron interval: 5 min
+- Branch protection: `strict: false`, `build` check required, 1 review
 
-**Pros**: No naming conflicts. Natural ordering.
-**Cons**: Drizzle doesn't support this natively. You'd need a custom migration runner.
+## Label Migration
 
-## Solution 2: Atlas (Recommended)
+When transitioning from v2 to v3, existing issues need pipeline labels.
 
-[Atlas](https://atlasgo.io/) is a declarative migration tool. Instead of writing migration files, you declare the desired schema:
-
-```hcl
-// schema.hcl
-table "users" {
-  schema = schema.public
-  column "id" {
-    type = uuid
-    default = sql("gen_random_uuid()")
-  }
-  column "email" {
-    type = varchar(255)
-  }
-  column "created_at" {
-    type = timestamptz
-    default = sql("now()")
-  }
-  primary_key {
-    columns = [column.id]
-  }
-}
-```
-
-Atlas compares the declared schema against the actual database and generates the required SQL:
+### Step 1: Audit Existing Issues
 
 ```bash
-atlas schema diff \
-  --from "postgresql://localhost:5432/mydb" \
-  --to "file://schema.hcl" \
-  --dev-url "docker://postgres/16"
+# Find issues with old labels
+gh issue list --state open --json number,title,labels,assignees
+
+# Categorize each:
+# - Has assignee + open PR → pipeline/pr-open
+# - Has assignee + no PR → pipeline/in-progress
+# - No assignee + "ready" label → pipeline/approved
+# - No labels → pipeline/discovered (needs triage)
 ```
 
-Output:
-```sql
-ALTER TABLE "users" ADD COLUMN "email" varchar(255);
-```
-
-**Why this works with parallel agents:**
-- Agents modify the schema declaration, not migration files
-- Two agents can independently add columns to the same schema file
-- Git merge handles the text merge (or flags a conflict)
-- Atlas generates the correct migration from the merged schema
-
-## Solution 3: drizzle-kit push (Development)
-
-For development/staging, skip migration files entirely:
+### Step 2: Create Pipeline Labels
 
 ```bash
-drizzle-kit push
+# Pipeline state labels
+gh label create "pipeline/discovered" --color "FBCA04"
+gh label create "pipeline/approved" --color "0E8A16"
+gh label create "pipeline/rejected" --color "B60205"
+gh label create "pipeline/in-progress" --color "1D76DB"
+gh label create "pipeline/pr-open" --color "5319E7"
+gh label create "pipeline/review-passed" --color "0E8A16"
+gh label create "pipeline/review-failed" --color "E99695"
+gh label create "pipeline/merged" --color "006B75"
+gh label create "pipeline/abandoned" --color "D93F0B"
+
+# Priority labels
+gh label create "priority/P0" --color "B60205"
+gh label create "priority/P1" --color "D93F0B"
+gh label create "priority/P2" --color "FBCA04"
+
+# Type labels
+gh label create "type/bug" --color "D73A4A"
+gh label create "type/enhancement" --color "A2EEEF"
+gh label create "type/chore" --color "D4C5F9"
+gh label create "type/security" --color "B60205"
+gh label create "type/performance" --color "F9D0C4"
+
+# Size labels
+gh label create "size/XS" --color "009800"
+gh label create "size/S" --color "77BB00"
+gh label create "size/M" --color "FBCA04"
+gh label create "size/L" --color "D93F0B"
+
+# Source labels
+gh label create "source/scout" --color "C5DEF5"
+gh label create "source/human" --color "BFD4F2"
+gh label create "source/sentinel" --color "D4C5F9"
+
+# Meta labels
+gh label create "agent-authored" --color "EDEDED"
 ```
 
-This directly syncs your Drizzle schema to the database without creating migration files. It:
-- Compares your TypeScript schema against the database
-- Generates and applies ALTER statements directly
-- No migration files, no journal, no conflicts
-
-**Use for**: Development, staging, pre-production environments.
-**Don't use for**: Production (no migration history, no rollback).
-
-## The Transition Path
-
-Here's how we migrated from Drizzle migrations to Atlas:
-
-### Phase 1: Stop Creating Migrations (Immediate)
-
-```typescript
-// drizzle.config.ts
-export default defineConfig({
-  schema: './src/db/schema.ts',
-  out: './drizzle',
-  dialect: 'postgresql',
-  // Remove: migrations: { ... }
-  // Agents use `drizzle-kit push` for development
-});
-```
-
-Update agent prompts: "Do NOT run `drizzle-kit generate`. Use `drizzle-kit push` to sync schema changes."
-
-### Phase 2: Set Up Atlas (Week 1)
+### Step 3: Apply Labels to Existing Issues
 
 ```bash
-# Install Atlas
-curl -sSf https://atlasgo.sh | sh
-
-# Create atlas.hcl config
-cat > atlas.hcl << EOF
-env "local" {
-  src = "file://schema.hcl"
-  url = "postgresql://localhost:5432/mydb?sslmode=disable"
-  dev = "docker://postgres/16/dev"
-  
-  migration {
-    dir = "file://migrations"
-  }
-}
-EOF
+# For each existing issue, apply the appropriate pipeline label
+gh issue edit 42 --add-label "pipeline/approved,priority/P1"
+gh issue edit 43 --add-label "pipeline/in-progress"
+# etc.
 ```
 
-### Phase 3: Generate Baseline Migration
+### Step 4: Create Infrastructure Issues
 
 ```bash
-# Capture current database state as the baseline
-atlas migrate diff baseline \
-  --env local \
-  --to "postgresql://localhost:5432/mydb"
+# Metrics dashboard
+gh issue create --title "📊 Pipeline Metrics" --label "pipeline/coordinator-lock" --pin
+
+# Start the coordinator cron
+# (platform-specific — see your orchestration tool's docs)
 ```
 
-### Phase 4: Use Atlas for All Future Migrations
+## The `strict: true` → `strict: false` Transition
+
+This is the scariest change. Here's how to do it safely:
+
+### 1. Verify Sentinel Is Working
+
+Before changing branch protection:
+- Confirm Sentinel health checks are running
+- Confirm the production URL responds to health checks
+- Confirm P0 issue creation works
+
+### 2. Change Branch Protection
 
 ```bash
-# When schema changes:
-atlas migrate diff add_likes_table --env local
-
-# In CI:
-atlas migrate lint --env local --latest 1
-
-# In production:
-atlas migrate apply --env local
+gh api repos/{owner}/{repo}/branches/main/protection \
+  --method PUT \
+  --field required_status_checks='{"strict":false,"contexts":["build"]}' \
+  --field enforce_admins=false \
+  --field required_pull_request_reviews='{"required_approving_review_count":1}' \
+  --field restrictions=null
 ```
 
-## Schema as Code (Drizzle + Atlas)
+### 3. Test with a Small Batch
 
-You can keep Drizzle for queries and type safety while using Atlas for migrations:
+Merge 2-3 PRs quickly (within the same minute). Check:
+- Does production stay healthy?
+- Does Sentinel detect the merges and verify?
+- Does CI still run correctly on subsequent PRs?
 
-```typescript
-// src/db/schema.ts — Drizzle schema (used for queries)
-export const users = pgTable('users', {
-  id: uuid('id').primaryKey().defaultRandom(),
-  email: varchar('email', { length: 255 }).notNull(),
-  createdAt: timestamp('created_at').defaultNow(),
-});
-```
+### 4. Scale Up
 
-```hcl
-// schema.hcl — Atlas schema (used for migrations)
-// Keep in sync with Drizzle schema
-table "users" {
-  schema = schema.public
-  column "id" { type = uuid; default = sql("gen_random_uuid()") }
-  column "email" { type = varchar(255); null = false }
-  column "created_at" { type = timestamptz; default = sql("now()") }
-  primary_key { columns = [column.id] }
-}
-```
+Once confident, increase WIP limit and let the pipeline ramp up.
 
-**Keeping them in sync**: This is the main challenge. Options:
-1. Manual sync (error-prone but simple)
-2. Generate Atlas schema from Drizzle schema (custom script)
-3. Use Atlas's [Drizzle provider](https://atlasgo.io/guides/orms/drizzle) to read Drizzle schema directly
+## Database Migration Considerations
 
-## CI Integration
+If your project uses sequential migration files (e.g., Drizzle), parallel agents will create conflicting migrations. Solutions:
 
-```yaml
-# .github/workflows/migration-check.yml
-name: Migration Check
+1. **Timestamp-based naming**: `20260212_143022_add_feature.sql` instead of `0004_add_feature.sql`
+2. **Declarative migrations** (Atlas): Agents modify schema declarations, tool generates migrations
+3. **Push-based development** (`drizzle-kit push`): Skip migration files in dev, generate in CI
 
-on:
-  pull_request:
-    paths:
-      - 'src/db/schema.ts'
-      - 'schema.hcl'
-      - 'migrations/**'
-
-jobs:
-  check:
-    runs-on: ubuntu-latest
-    services:
-      postgres:
-        image: postgres:16
-        env:
-          POSTGRES_PASSWORD: test
-        ports:
-          - 5432:5432
-
-    steps:
-      - uses: actions/checkout@v4
-      
-      - uses: ariga/setup-atlas@v1
-      
-      - name: Lint migrations
-        run: atlas migrate lint --env ci --latest 1
-      
-      - name: Verify migration applies cleanly
-        run: atlas migrate apply --env ci --dry-run
-```
-
-This catches:
-- Destructive changes (DROP TABLE without explicit approval)
-- Invalid SQL
-- Migrations that don't apply cleanly on a fresh database
-- Schema drift between Drizzle and Atlas definitions
+See the original v0.1 playbook docs for detailed migration strategies.
