@@ -1,5 +1,22 @@
 # Changelog
 
+## v0.3.0 — 2026-02-12
+
+### V4 roster update: 25 roles, 38 agents
+
+**Roster changes:**
+- Merged roles: i18n+SEO+Accessibility → Web Standards Engineer, Dead Code+Deprecation+Error Handler → Code Cleaner, Dep Audit+Update → Dependency Manager, Tech Writer+API Docs → Documentation Engineer, Database Engineer+Infra Builder → Fullstack Builder, Integration Tester → E2E Tester (×2)
+- Added roles: Growth Strategist, Content Creator, Growth Engineer, Analytics Engineer, Mobile Optimizer, Fullstack Builder
+- Scaled up: UI Builder ×3, API Builder ×3, E2E Tester ×2, Unit Tester ×2, Code Reviewer ×4
+- New department: Growth (Strategist, Engineer ×2, Content Creator ×2, Analytics Engineer)
+
+**Documentation philosophy:**
+- Agent briefs are now 1-2 sentences — tell WHAT, not HOW
+- All V4 docs rewritten to be concise and high-signal
+- Removed procedural step-by-step scripts throughout
+
+**Updated files:** agent-roles.md, pipeline-v4-architecture.md, coordinator-guide.md, README.md
+
 ## v0.2.0 — 2026-02-12
 
 ### Complete rewrite based on v3 pipeline launch

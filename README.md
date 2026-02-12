@@ -3,7 +3,7 @@
 ### How to run an autonomous AI-agent development team
 
 > Real patterns from shipping a production app with zero human code.
-> 32 agents. 28 specialized roles. No broken deploys.
+> 38 agents. 25 specialized roles. No broken deploys.
 
 ---
 
@@ -11,37 +11,42 @@
 
 We built [viral](https://github.com/SylphxAI/viral) — a production Next.js app — using fully autonomous AI agents. Not copilot autocomplete. A fleet of specialized agents that discover issues, write code, review each other, merge, and monitor production health.
 
-**This playbook is the operating manual.** Every recommendation comes from a real incident, a real config, or a real production failure. We include actual YAML, actual error messages, and actual war stories.
+**This playbook is the operating manual.** Every recommendation comes from a real incident, a real config, or a real production failure.
 
 ## Current Architecture: V4 (Perpetual Motion)
 
-V4 replaces the sequential pipeline with a **perpetual motion model** — 28 specialized roles across 10 departments, all working in parallel. No pipeline. No state machine. No handoffs. Just Git.
+V4 replaces the sequential pipeline with a **perpetual motion model** — 25 specialized roles across 10 departments, all working in parallel. No pipeline. No state machine. No handoffs. Just Git.
 
 | Metric | Value |
 |--------|-------|
-| Specialized roles | **28** |
-| Agent instances | **32** |
+| Specialized roles | **25** |
+| Agent instances | **38** |
 | Departments | **10** |
 | Pipeline stages | **0** (no pipeline) |
 | State management | **None** (stateless coordinator) |
 | Production downtime | **0** |
 | Human code written | **0 lines** |
 
+### Prompt Philosophy
+
+Agent briefs are 1-2 sentences, not step-by-step scripts. AI has thinking ability — tell WHAT, not HOW. Every role gets a mission and a domain, not a checklist.
+
 ### V4 Quick Start
 
 1. **[V4 Architecture](docs/pipeline-v4-architecture.md)** — The perpetual motion model. Git-first principles, no-waiting design, convergent quality.
-2. **[Agent Roles](docs/agent-roles.md)** — All 28 roles: what they do, what they look for, what they produce.
-3. **[Coordinator Guide](docs/coordinator-guide.md)** — The 5-step reconciliation loop. Roster config, scaling, monitoring.
+2. **[Agent Roles](docs/agent-roles.md)** — All 25 roles: what they do, how they're organized, what changed.
+3. **[Coordinator Guide](docs/coordinator-guide.md)** — The reconciliation loop. Roster config, scaling, monitoring.
 4. **[V3 to V4 Migration](docs/v3-to-v4-migration.md)** — What changed, how to switch, what to watch.
 
 ## Key Insights (TL;DR)
 
-- **No pipeline beats any pipeline.** V4 eliminated sequential handoffs entirely. All 32 agents work in parallel from minute one.
-- **Specialists beat generalists.** 28 focused roles find deeper issues than 6 generalists ever could.
+- **No pipeline beats any pipeline.** V4 eliminated sequential handoffs entirely. All 38 agents work in parallel from minute one.
+- **Specialists beat generalists.** 25 focused roles find deeper issues than 6 generalists ever could.
 - **Git is the only coordination layer.** Issues, PRs, and branches. No labels for state, no FSM, no orchestrator.
 - **The coordinator is a reconciliation loop, not an orchestrator.** It maintains fleet size and merges approved PRs. That's it.
+- **Tell WHAT, not HOW.** Agent briefs are 1-2 sentences. AI can reason — give it a mission, not a procedure.
 - **Idle agents exit immediately.** No busywork. If there's nothing to do, the agent is gone in under a minute.
-- **The system self-corrects.** Overlapping work gets caught by Reviewers. Inconsistencies get fixed by Refactorers. Type issues get fixed by Type Hardeners. The codebase converges.
+- **The system self-corrects.** Overlapping work gets caught by Reviewers. Inconsistencies get fixed by Refactorers. The codebase converges.
 
 ## Architecture at a Glance
 
@@ -52,10 +57,10 @@ V4 replaces the sequential pipeline with a **perpetual motion model** — 28 spe
 └─────────────────────────────────────────────────────────────┘
         ↕                ↕                ↕
 ┌───────────────────────────────────────────────────────────────┐
-│                     AGENT FLEET (32 instances)                │
-│  Product (3) · Engineering (6) · Quality (3) · Security (2)  │
-│  Performance (2) · Code Health (4) · Maintenance (2)         │
-│  Standards (5) · Infrastructure (1) · Gates (4)              │
+│                     AGENT FLEET (38 instances)                │
+│  Product (3) · Engineering (9) · Quality (4) · Security (2)  │
+│  Performance (3) · Code Health (3) · Standards (2)           │
+│  Growth (6) · Infrastructure (1) · Gates (5)                 │
 └───────────────────────────────────────────────────────────────┘
         ↕                ↕                ↕
 ┌───────────────────────────────────────────────────────────────┐
@@ -64,8 +69,6 @@ V4 replaces the sequential pipeline with a **perpetual motion model** — 28 spe
 └───────────────────────────────────────────────────────────────┘
 ```
 
-All coordinated by a stateless reconciliation loop running every 5 minutes. No locks. No webhooks. No state. Just polling + idempotent operations.
-
 ## Table of Contents
 
 ### V4 Documentation (Current)
@@ -73,7 +76,7 @@ All coordinated by a stateless reconciliation loop running every 5 minutes. No l
 | # | Document | What You'll Learn |
 |---|----------|-------------------|
 | — | [V4 Architecture](docs/pipeline-v4-architecture.md) | Perpetual motion model, git-first principles, no-waiting design |
-| — | [Agent Roles](docs/agent-roles.md) | All 28 roles across 10 departments with full specifications |
+| — | [Agent Roles](docs/agent-roles.md) | All 25 roles across 10 departments with V4 changes |
 | — | [Coordinator Guide](docs/coordinator-guide.md) | Reconciliation algorithm, roster config, scaling, monitoring |
 | — | [V3 → V4 Migration](docs/v3-to-v4-migration.md) | What changed, key differences, migration steps |
 
