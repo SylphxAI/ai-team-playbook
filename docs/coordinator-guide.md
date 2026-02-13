@@ -1,6 +1,6 @@
 # Coordinator Guide
 
-The coordinator is a **reconciler with a health check**. It maintains fleet size and guards production uptime. Nothing else.
+The coordinator is a **reconciler with a CI check**. It maintains fleet size and guards CI health. Nothing else.
 
 ## Algorithm
 
@@ -9,8 +9,8 @@ Runs every 5 minutes. Stateless, idempotent.
 ```
 1. INVENTORY     — sessions_list, count active agents by v4-* label prefix
 2. SPAWN DEFICIT — for each role, if running < desired, sessions_spawn the difference
-3. HEALTH CHECK  — curl -s -o /dev/null -w "%{http_code}" <PRODUCTION_URL>
-                   if not 200 → spawn one-off revert agent (label: v4-revert)
+3. CI CHECK      — check main branch CI status
+                   if not success → spawn one-off CI fix agent (label: v4-cifix)
 4. SUMMARY       — print agents running/desired, health status, any spawn failures
 ```
 
@@ -20,26 +20,24 @@ Four steps. No merging, no code review, no work assignment.
 
 | Responsibility | Owner | Why not coordinator? |
 |---------------|-------|---------------------|
-| Merge PRs | **Review** agents | Reviewers have full code context from review — natural merge point |
-| Review code | **Review** agents | Code quality judgment doesn't belong in a cron loop |
-| Assign work | **Nobody** | Agents self-direct from issues or their own judgment |
-| Manage state | **Nobody** | Git is the only state. No labels, no FSM, no workflow |
+| Merge PRs | **Review** agent | Reviewer has full code context from review — natural merge point |
+| Review code | **Review** agent | Code quality judgment doesn't belong in a cron loop |
+| Assign work | **Nobody** | Agents self-direct from issues (approved by Triage) |
+| Manage state | **Nobody** | Git is the only state. Labels for claiming, not FSM |
 | Product decisions | **Product** agent | Strategic thinking doesn't belong in a reconciler |
+| Issue quality | **Triage** agent | Approve/reject decisions need judgment, not cron |
 
 ## Roster Configuration
 
 | Direction | Key | Desired |
 |-----------|-----|---------|
 | Product | `v4-product` | 1 |
-| Build | `v4-builder` | 12 |
-| Test — Unit | `v4-tester_unit` | 2 |
-| Test — Integration | `v4-tester_integration` | 1 |
-| Test — E2E | `v4-tester_e2e` | 2 |
-| Improve | `v4-improver` | 2 |
-| Secure | `v4-security` | 1 |
-| Perf | `v4-perf` | 1 |
-| Review | `v4-reviewer` | 4 |
-| **Total** | | **26** |
+| Audit | `v4-audit` | 1 |
+| Triage | `v4-triage` | 1 |
+| Build | `v4-builder` | 3 |
+| Test | `v4-tester` | 1 |
+| Review | `v4-reviewer` | 1 |
+| **Total** | | **8** |
 
 ## Spawning
 
@@ -53,14 +51,14 @@ Every agent's task has two parts:
 
 The project context is prepended to every agent's task, giving all agents identical understanding of the product. The role briefs are generic and project-agnostic.
 
-## Health Check & Revert
+## CI Check & Fix
 
-The coordinator runs a simple HTTP check against the production URL every 5 minutes:
+The coordinator checks main branch CI status every 5 minutes:
 
-- **200** → healthy, continue
-- **Not 200** → spawn a one-off revert agent with label `v4-revert`
+- **Success** → healthy, continue
+- **Failure** → spawn a one-off CI fix agent with label `v4-cifix`
 
-The revert agent's task: find the most recent merge, determine if it caused the break, create a revert PR. It's a temporary agent — spawned on-demand, exits when done. No permanent monitoring role needed.
+Main CI broken = P0 — it blocks all development, all merges, all deploys. The fix agent diagnoses the failure, fixes the code, and exits. No permanent monitoring role needed.
 
 ## Scaling
 
@@ -68,10 +66,11 @@ Adjust counts based on bottlenecks:
 
 | Symptom | Action |
 |---------|--------|
-| PR queue growing | Add more Review agents (default: 4) |
-| Issues piling up | Add more Builders (default: 12) |
-| Test coverage lagging | Add testers |
-| Code quality drifting | Add Improve agents |
+| PR queue growing | Add more Review agents (default: 1) |
+| Approved issues piling up | Add more Builders (default: 3) |
+| PRs waiting for tests | Add more Testers (default: 1) |
+| Code quality drifting | Audit agent creates issues; Triage prioritizes them |
+| Issues not getting reviewed | Add more Triage agents (default: 1) |
 
 The coordinator doesn't need to understand scaling strategy — just update the roster numbers.
 
@@ -79,7 +78,7 @@ The coordinator doesn't need to understand scaling strategy — just update the 
 
 The entire coordinator prompt is ~5KB:
 - Project context: ~500 bytes (configured per-project)
-- 7 role briefs: ~200-400 bytes each (generic keyword lists)
+- 6 role briefs: ~200-400 bytes each (generic keyword lists)
 - Algorithm + roster table: ~1KB
 
 Compact by design. AI reasons better with concise direction than verbose instructions.
@@ -92,6 +91,7 @@ Compact by design. AI reasons better with concise direction than verbose instruc
 | Spawn fails | Fewer agents than desired | Next run retries — idempotent |
 | Too many agents | Resource waste | Agents exit when idle — self-correcting |
 | Agent crashes | One less worker | Next reconciliation spawns replacement |
-| Site goes down | Users affected | Health check spawns revert agent |
+| Main CI breaks | All merges blocked | CI check spawns fix agent |
+| Builder dies mid-work | Issue stuck with `in-progress` label | Triage cleans up stale labels after 30 min |
 
 The system tolerates coordinator failures gracefully. Agents are independent — they don't need the coordinator to do their work, only to exist.
