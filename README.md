@@ -75,6 +75,10 @@ Swap project context → same playbook, different product.
 | [Agent Roles](docs/agent-roles.md) | Role briefs, testing model, design rationale |
 | [Setup Guide](docs/setup-guide.md) | How to copy this workflow to any project |
 | [Lessons Learned](docs/lessons-learned.md) | Hard-won lessons from V3 and V4 |
+| [Coding Standards](docs/coding-standards.md) | Stack, conventions, linting, testing |
+| [Environments](docs/environments.md) | Production, preview, Vercel, Neon |
+| [CI/CD](docs/ci-cd.md) | GitHub Actions, deployment, Atlas migrations |
+| [New Project](docs/new-project.md) | Checklist for setting up a new project |
 
 ## Branch Protection
 
