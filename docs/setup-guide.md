@@ -1,10 +1,10 @@
 # Setup Guide — How to Copy This Workflow
 
-Step-by-step guide to set up an autonomous AI agent team on any project.
+Step-by-step guide to set up an autonomous AI agent team for one or more projects.
 
 ## Prerequisites
 
-- GitHub repo (public or private)
+- One or more GitHub repos (public or private)
 - [OpenClaw](https://github.com/nicepkg/openclaw) instance running
 - GitHub org (for GitHub App — or use fine-grained PAT as alternative)
 
@@ -36,7 +36,7 @@ No seat cost. Commits show as `app-name[bot]`. Scoped permissions. Auto-expiring
 6. "Where can this app be installed?" → Only on this account
 7. **Generate a private key** → save as `.pem` file
 8. Note the **App ID** from the app settings page
-9. **Install** the app on your target repos
+9. **Install** the app on **all target repos** (important for multi-project setup)
 10. Note the **Installation ID** from the URL after installing (`/installations/XXXXX`)
 
 **Generate tokens:**
@@ -84,10 +84,10 @@ Use a personal account for these operations when needed.
 
 ## 2. Branch Protection
 
-Configure on your `main` branch:
+Configure on your `dev` branch (and optionally `main`):
 
 ```bash
-gh api repos/{owner}/{repo}/branches/main/protection \
+gh api repos/{owner}/{repo}/branches/dev/protection \
   --method PUT \
   --field required_status_checks='{"strict":false,"contexts":["build"]}' \
   --field enforce_admins=false \
@@ -97,6 +97,8 @@ gh api repos/{owner}/{repo}/branches/main/protection \
   --field allow_force_pushes=false \
   --field allow_deletions=false
 ```
+
+**Apply this to every repo** in your multi-project setup. All PRs target `dev`, never `main`.
 
 Repo-level merge settings:
 - ✅ Allow squash merge (only strategy enabled)
@@ -119,9 +121,9 @@ Minimal GitHub Actions workflow. Single required check: `build`.
 name: CI
 on:
   pull_request:
-    branches: [main]
+    branches: [dev]
   push:
-    branches: [main]
+    branches: [dev, main]
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -142,65 +144,64 @@ jobs:
         if: hashFiles('**/*.test.*', '**/*.spec.*') != ''
 ```
 
+**Apply this to every repo** — adapt the build steps per project but keep the structure consistent.
+
 Key decisions:
 - **`continue-on-error: true` for lint** — catches style issues without blocking merges
 - **`--frozen-lockfile`** — prevents agents from accidentally modifying lockfile
 - **`cancel-in-progress`** — kills stale CI runs when agents push fixes
 - **`timeout-minutes: 10`** — prevents infinite loops and runaway builds
 
-Optional post-merge verification (auto-creates P0 issue on failure):
-```yaml
-# .github/workflows/post-merge.yml
-name: Post-Merge
-on:
-  push:
-    branches: [main]
-jobs:
-  verify:
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v4
-      - uses: oven-sh/setup-bun@v2
-      - run: bun install --frozen-lockfile
-      - run: bun run build
-      - name: Create issue on failure
-        if: failure()
-        uses: actions/github-script@v7
-        with:
-          script: |
-            await github.rest.issues.create({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              title: `🚨 Build broken on main — ${context.sha.substring(0, 7)}`,
-              body: `Commit: ${context.sha}\nRun: ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
-              labels: ['bug', 'P0'],
-            });
+## 4. Repo Context (CLAUDE.md)
+
+Each repo should have a `CLAUDE.md` at its root. This is how agents learn project-specific context:
+
+```markdown
+# Project Name
+
+Brief description of what this project does.
+
+## Stack
+- Framework, language, database, etc.
+
+## Conventions
+- Code style, naming, architecture patterns
+
+## Development
+- How to run locally, test, build
+
+## Key Files
+- Important paths agents should know about
 ```
 
-## 4. OpenClaw Cron Setup
+When the coordinator spawns an agent for a specific repo, the agent reads that repo's `CLAUDE.md` first. This replaces the old approach of embedding project context in the coordinator prompt.
 
-The coordinator runs as a cron job in OpenClaw, every 5 minutes.
+## 5. Unified Coordinator Setup
 
-### Create the coordinator prompt
+The coordinator runs as **one cron job** managing **all repos** (see [Multi-Project](multi-project.md) for rationale).
 
-Write a coordinator prompt that includes:
-1. The 4-step algorithm (inventory → spawn deficit → CI check → summary)
-2. Roster table (direction, key, desired count)
-3. Project context block (prepended to every agent task)
-4. Role briefs for each direction
+### Write the coordinator prompt
 
-See the [Agent Roles](agent-roles.md) for brief templates.
+Create a prompt file that includes:
+1. The list of all repos to manage
+2. The 6-step algorithm (inventory → check repos → prioritize → spawn deficit → CI check → summary)
+3. Roster table (direction, key, desired count)
+4. Spawn templates for each role
 
-### Create the cron job
+Key principles:
+- Agents are **not assigned to repos** — they pick work by priority across all repos
+- Priority: failing CI > broken PRs > PRs needing review > approved issues > untriaged issues
+- Coordinator does NOT do work itself — only spawns and monitors
+
+### Register the cron job
 
 ```bash
 openclaw cron create \
-  --name "v4-coordinator" \
+  --name "unified-coordinator" \
   --interval "*/5 * * * *" \
   --model "claude-opus-4-6" \
   --thinking high \
-  --task "$(cat coordinator-prompt.md)"
+  --task "$(cat unified-coordinator.md)"
 ```
 
 Or configure via `openclaw.json`:
@@ -208,85 +209,54 @@ Or configure via `openclaw.json`:
 {
   "cron": [
     {
-      "name": "v4-coordinator",
+      "name": "unified-coordinator",
       "schedule": "*/5 * * * *",
       "model": "claude-opus-4-6",
       "thinking": "high",
-      "taskFile": "coordinator-prompt.md"
+      "taskFile": "prompts/unified-coordinator.md"
     }
   ]
 }
 ```
 
-### Coordinator prompt structure
+## 6. Labels
 
-```markdown
-# V4 Coordinator
-
-Maintain a fleet of 8 agents across 6 directions. Every 5 min. Stateless, idempotent.
-
-## Algorithm
-1. INVENTORY — sessions_list, count active v4-* agents
-2. SPAWN DEFICIT — if running < desired, spawn the difference
-3. CI CHECK — gh run list ... if not success → spawn v4-cifix
-4. SUMMARY — print status
-
-## Project Context (prepend to every agent task)
-> **Project**: YourOrg/your-repo — description
-> **Competitors**: ...
-> **Repo**: YourOrg/your-repo. One focused PR per session.
-> **Git identity**: export GH_TOKEN=$(node /path/to/gh-app-token.js builder)
-
-## Roster
-| Direction | Key | Count |
-|-----------|-----|-------|
-| Product | v4-product | 1 |
-| Audit | v4-audit | 1 |
-| Triage | v4-triage | 1 |
-| Build | v4-builder | 3 |
-| Test | v4-tester | 1 |
-| Review | v4-reviewer | 1 |
-
-## Role Briefs
-(paste keyword lists from agent-roles.md)
-```
-
-## 5. Labels (Optional)
-
-Minimal label set for the workflow:
+Minimal label set. **Apply to every repo:**
 
 ```bash
-REPO="your-org/your-repo"
-# Priority
-gh label create "P0" --repo $REPO --color "B60205" --force
-gh label create "P1" --repo $REPO --color "D93F0B" --force
-gh label create "P2" --repo $REPO --color "FBCA04" --force
-# Workflow
-gh label create "approved" --repo $REPO --color "0E8A16" --force
-gh label create "rejected" --repo $REPO --color "B60205" --force
-gh label create "in-progress" --repo $REPO --color "1D76DB" --force
-gh label create "fixing" --repo $REPO --color "D93F0B" --force
-# Size
-gh label create "XS" --repo $REPO --color "009800" --force
-gh label create "S" --repo $REPO --color "77BB00" --force
-gh label create "M" --repo $REPO --color "FBCA04" --force
-gh label create "L" --repo $REPO --color "D93F0B" --force
+for REPO in "org/repo-a" "org/repo-b" "org/repo-c"; do
+  # Priority
+  gh label create "p0-critical" --repo $REPO --color "B60205" --force
+  gh label create "p1-high" --repo $REPO --color "D93F0B" --force
+  gh label create "p2-medium" --repo $REPO --color "FBCA04" --force
+  gh label create "p3-low" --repo $REPO --color "C5DEF5" --force
+  # Workflow
+  gh label create "approved" --repo $REPO --color "0E8A16" --force
+  gh label create "rejected" --repo $REPO --color "B60205" --force
+  gh label create "in-progress" --repo $REPO --color "1D76DB" --force
+  gh label create "fixing" --repo $REPO --color "D93F0B" --force
+  # Source
+  gh label create "product" --repo $REPO --color "7057FF" --force
+  gh label create "audit" --repo $REPO --color "E4E669" --force
+done
 ```
 
-## 6. Checklist
+## 7. Checklist
 
 Before going live:
 
-- [ ] GitHub App(s) created and installed on repo
+- [ ] GitHub App(s) created and installed on **all target repos**
 - [ ] Token generation script working
-- [ ] Branch protection configured (`strict: false`, `build` required, 1 review)
-- [ ] Squash merge only, auto-delete branches
-- [ ] CI workflow committed (`.github/workflows/ci.yml`)
-- [ ] Labels created
-- [ ] Coordinator prompt written with project context + role briefs
-- [ ] Cron job created in OpenClaw
+- [ ] Branch protection configured on `dev` branch (all repos)
+- [ ] Squash merge only, auto-delete branches (all repos)
+- [ ] CI workflow committed to all repos
+- [ ] `CLAUDE.md` written for each repo
+- [ ] Labels created on all repos
+- [ ] Coordinator prompt written with all repos listed
+- [ ] Cron job created in OpenClaw (start disabled, enable after testing)
 - [ ] Test: manually trigger coordinator, verify it spawns agents
-- [ ] Test: verify builder can push, reviewer can approve+merge
+- [ ] Test: verify builder can push to all repos
+- [ ] Test: verify reviewer can approve+merge on all repos
 
 ## Scaling
 
@@ -296,5 +266,6 @@ Before going live:
 | Approved issues piling up | Add Builders |
 | PRs waiting for tests | Add Testers |
 | Low-quality issues | Triage is working — check Audit/Product prompts |
+| One repo starving | Check priority balance, consider priority boost |
 
 Start with the default roster (8 agents). Adjust after observing bottlenecks.

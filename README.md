@@ -2,27 +2,35 @@
 
 Run an autonomous AI-agent development team. 8 agents, 6 directions, zero human code.
 
-Patterns from shipping a production app ([viral](https://github.com/SylphxAI/viral)) — but the architecture is generic. Swap the project context, keep the playbook.
+Patterns from shipping production apps across multiple repos — but the architecture is generic. Swap the project context, keep the playbook.
 
 ## Architecture
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
-│              COORDINATOR (cron, every 5 min)                  │
-│        Inventory → Spawn deficits → CI check → Report        │
+│          UNIFIED COORDINATOR (cron, every 5 min)             │
+│     Inventory → Check All Repos → Prioritize →              │
+│     Spawn Deficits → CI Check → Report                      │
 └──────────────────────────────────────────────────────────────┘
         ↕                ↕                ↕
 ┌──────────────────────────────────────────────────────────────┐
 │                   AGENT FLEET (8 instances)                   │
 │   Product(1) · Audit(1) · Triage(1) · Build(3)              │
 │   Test(1) · Review(1)                                        │
+│         Agents pick work from ANY repo by priority           │
 └──────────────────────────────────────────────────────────────┘
         ↕                ↕                ↕
 ┌──────────────────────────────────────────────────────────────┐
 │              GITHUB (Single Source of Truth)                  │
-│         Issues · Pull Requests · main branch                 │
+│  ┌──────────────┐ ┌──────────────┐ ┌──────────────┐        │
+│  │  Repo A      │ │  Repo B      │ │  Repo C      │        │
+│  │  Issues, PRs │ │  Issues, PRs │ │  Issues, PRs │        │
+│  │  dev branch  │ │  dev branch  │ │  dev branch  │        │
+│  └──────────────┘ └──────────────┘ └──────────────┘        │
 └──────────────────────────────────────────────────────────────┘
 ```
+
+**One coordinator, one team, multiple repos.** See [Multi-Project](docs/multi-project.md) for why.
 
 ## Roster — 6 Directions, 8 Agents
 
@@ -42,7 +50,8 @@ Patterns from shipping a production app ([viral](https://github.com/SylphxAI/vir
 - **No pipeline.** All 8 agents work in parallel. No stages, no handoffs, no state machine.
 - **Git is the only coordination.** Issues, PRs, labels (`in-progress`, `fixing`). Nothing else.
 - **Coordinator is a reconciler.** Maintains fleet size + checks CI. Does not merge, review, or assign work.
-- **Generic briefs + project context.** Role briefs are reusable keyword lists. Project context is prepended separately.
+- **Multi-repo by default.** One coordinator scans all repos, agents pick work by priority.
+- **Generic briefs + project context.** Role briefs are reusable keyword lists. Project context comes from each repo's `CLAUDE.md`.
 - **Separate testing.** Builders write code only. Testers write tests independently on open PRs.
 - **Builders fix first, build second.** Failing PRs = P0. New features from approved issues = P2.
 - **Reviewers merge.** The agent who reviewed the code merges it. No separate merger role.
@@ -54,26 +63,29 @@ Runs every 5 minutes. Stateless, idempotent.
 
 ```
 1. INVENTORY     — count active agents by label prefix
-2. SPAWN DEFICIT — if running < desired, spawn the difference
-3. CI CHECK      — if main CI failing, spawn one-off fix agent
-4. SUMMARY       — print status
+2. CHECK REPOS   — scan ALL repos for work (CI, PRs, issues)
+3. PRIORITIZE    — failing CI > broken PRs > approved issues > new issues
+4. SPAWN DEFICIT — if running < desired, spawn the difference
+5. CI CHECK      — if any repo's dev/main CI failing, prioritize fix
+6. SUMMARY       — print status across all repos
 ```
 
 ## Prompt Architecture
 
-Every agent prompt = **project context** (~500 bytes) + **role brief** (~200-400 bytes).
+Every agent prompt = **repo context** (from `CLAUDE.md`) + **role brief** (~200-400 bytes).
 
-- **Project context**: product name, URL, competitors, repo, commit identity. Identical for all agents. Configured per-project.
+- **Repo context**: read from the target repo's `CLAUDE.md` at spawn time. Each repo defines its own stack, conventions, and goals.
 - **Role brief**: keyword clusters covering all aspects of the direction. Generic, project-agnostic.
 
-Swap project context → same playbook, different product.
+Agents are not assigned to repos — they pick work from any repo based on priority.
 
 ## Docs
 
 | File | Content |
 |------|---------|
 | [Agent Roles](docs/agent-roles.md) | Role briefs, testing model, design rationale |
-| [Setup Guide](docs/setup-guide.md) | How to copy this workflow to any project |
+| [Setup Guide](docs/setup-guide.md) | How to set up this workflow (single or multi-project) |
+| [Multi-Project](docs/multi-project.md) | How one team works across multiple repos |
 | [Lessons Learned](docs/lessons-learned.md) | Hard-won lessons from V3 and V4 |
 | [Coding Standards](docs/coding-standards.md) | Stack, conventions, linting, testing |
 | [Environments](docs/environments.md) | Production, preview, Vercel, Neon |
