@@ -1,60 +1,126 @@
 # GitHub Flow — PR-First Development
 
-> No integration branch. Every change ships through a PR with its own isolated preview deployment. Merge to `main` = production.
+> No integration branch. Every change ships through a PR with its own isolated preview. Merge to `main` auto-deploys to staging. Manual promote to production.
 
 ## Problem
 
-Traditional GitFlow uses a `dev` branch as an integration layer:
-
-```
-feature → PR → dev → staging → main (production)
-```
-
-This made sense when developers needed a shared environment to test combined changes. But for AI agent teams where:
+Traditional GitFlow uses a `dev` branch as a shared integration layer — designed for teams with local development environments. For AI agent teams where:
 - No one does local development
-- Each agent works independently on separate PRs
-- Vercel creates a preview deployment for every PR automatically
+- Each agent works independently, submitting PRs like open source contributors
+- Vercel creates a preview deployment per PR automatically
 
-...the `dev` branch is pure overhead. It adds complexity, requires periodic dev→main promotions, and gives agents an extra thing to reason about (which branch to target).
+...the `dev` branch is pure overhead. But simply merging PRs straight to production is also reckless. The solution is a deployment pipeline that matches how the work actually happens.
 
-## Solution
-
-GitHub Flow — the same model used by most major open source projects:
+## The Flow
 
 ```
-feature branch → PR (preview deployment = staging) → main (production)
+feature branch
+     │
+     ▼
+  PR open ──────► PR Preview deployment
+                   └─ per-PR ephemeral DB (schema only, no prod data)
+     │
+     ▼ merge to main
+     │
+  main ──────────► Staging (auto-deploy)
+                   └─ staging DB (shared, integration point)
+     │
+     ▼ manual promote
+     │
+  Production ─────► Live
+                   └─ Neon main branch (prod DB)
 ```
 
-Each PR gets its own Vercel preview URL. That preview IS the staging environment for that change. Test it, approve it, merge it. No shared integration branch needed.
+## Three Environments
 
-## How It Works
+| Environment | Trigger | URL | Database |
+|-------------|---------|-----|----------|
+| PR Preview | PR opened | `*.vercel.app/pr-N` | Ephemeral Neon branch (per PR, schema only) |
+| Staging | Push to `main` | `staging.domain.com` | Neon staging branch |
+| Production | Manual promote | `domain.com` | Neon `main` branch |
 
+## Database Strategy — Option C: Per-PR Ephemeral DB
+
+**Option A (skip DB in preview):** Simplest, but tests almost nothing — you only verify the app starts.
+
+**Option B (shared staging DB):** All previews share one Postgres. Multiple concurrent PRs can conflict on migrations — one PR's schema change breaks another PR's preview.
+
+**Option C (per-PR ephemeral DB) ← recommended:**
+- PR opens → create Neon branch from `main` (schema only, no prod data)
+- PR preview uses this isolated branch
+- PR closes → delete the branch
+- Zero cross-PR contamination
+- Neon branches are copy-on-write — near-zero storage cost until written
+
+### Implementation (GitHub Actions)
+
+```yaml
+# .github/workflows/preview-db.yml
+name: Preview DB
+
+on:
+  pull_request:
+    types: [opened, reopened, closed]
+
+jobs:
+  setup-preview-db:
+    if: github.event.action != 'closed'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Create Neon branch
+        uses: neondatabase/create-branch-action@v5
+        id: neon
+        with:
+          project_id: ${{ secrets.NEON_PROJECT_ID }}
+          branch_name: preview/pr-${{ github.event.number }}
+          api_key: ${{ secrets.NEON_API_KEY }}
+
+      - name: Set Preview DB URL on Vercel
+        run: |
+          vercel env add DATABASE_URL preview \
+            --value "${{ steps.neon.outputs.db_url_with_pooler }}" \
+            --git-branch "pr-${{ github.event.number }}" \
+            --token ${{ secrets.VERCEL_TOKEN }}
+
+  teardown-preview-db:
+    if: github.event.action == 'closed'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Delete Neon branch
+        uses: neondatabase/delete-branch-action@v3
+        with:
+          project_id: ${{ secrets.NEON_PROJECT_ID }}
+          branch: preview/pr-${{ github.event.number }}
+          api_key: ${{ secrets.NEON_API_KEY }}
 ```
-┌─────────────────────────────────────────────────────────┐
-│  Agent creates feature branch from main                  │
-│  Agent opens PR                                          │
-│          ↓                                               │
-│  Vercel deploys PR preview (isolated staging)            │
-│  CI runs (lint, build, tests)                            │
-│          ↓                                               │
-│  Gatekeeper reviews + approves                           │
-│          ↓                                               │
-│  Squash merge → main → production deploy                 │
-└─────────────────────────────────────────────────────────┘
-```
 
-### What Each Layer Does
+## Staging Environment
 
-| Layer | Git | URL | Database |
-|-------|-----|-----|----------|
-| Production | `main` | your domain | Neon `main` branch |
-| Staging (per PR) | feature branch | `*.vercel.app` preview | Neon `dev` branch |
+Keep a lightweight staging environment — **not a git branch**, a Vercel deployment target.
 
-Note: The Neon `dev` database branch is still useful — all PR previews share it. Only the git `dev` branch is removed. Database layer still has dev/prod separation.
+Why staging (even with PR previews):
+- **External client review** (e.g. Epiow): clients review new features before production. You can't send clients to a `*.vercel.app` preview URL — it looks unprofessional and previews may expire.
+- **Integration point**: after multiple PRs merge, staging shows the combined state. PR previews only show one PR in isolation.
+- **Final sanity check**: catch issues that only appear when features interact.
 
-## Implementation
+### Vercel Implementation
 
-### Branch Protection (main only)
+Two options:
+
+**Option 1: Separate Vercel project for staging**
+- `staging-viral` project auto-deploys from `main`
+- `viral` (production) deploys only on manual promote
+- Clean separation, separate env vars
+
+**Option 2: Vercel deployment protection + manual promote**
+- `main` deploys to production but with manual approval gate
+- Use Vercel's "Promote to Production" API after confirming staging looks good
+
+Staging DB: a dedicated Neon branch called `staging` (shared across all staging deploys, persistent).
+
+## Branch Protection
+
+Only `main` needs protection. No `dev` branch:
 
 ```bash
 gh api repos/{owner}/{repo}/branches/main/protection \
@@ -63,75 +129,46 @@ gh api repos/{owner}/{repo}/branches/main/protection \
   --field enforce_admins=false \
   --field required_pull_request_reviews='{"required_approving_review_count":1}' \
   --field restrictions=null \
-  --field required_linear_history=true \
   --field allow_force_pushes=false \
   --field allow_deletions=false
 ```
 
-No branch protection needed on `dev` because `dev` no longer exists as a permanent branch.
+## Agent Workflow
 
-### Repo Merge Settings
-
-- ✅ Squash merge only
-- ✅ Auto-delete head branches
-- ❌ No merge commits
-- ❌ No rebase merge
-
-### Agent Workflow
-
-Builders always branch from `main`:
+Agents always branch from `main`:
 
 ```bash
 git checkout main && git pull
-git checkout -b feat/my-feature
-# ... make changes ...
-gh pr create --base main --title "..." --body "..."
+git checkout -b feat/issue-123-description
+# ... implement ...
+gh pr create --base main --title "feat: ..." --body "Closes #123"
 ```
 
-All PRs target `main`. Never create a `dev` branch.
+All PRs target `main`. The coordinator spawns agents with this context. No `dev` branch exists.
 
-### Vercel
+## Compatibility with Current Setup
 
-No changes needed. Vercel already:
-- Deploys `main` to production
-- Deploys every PR branch to a preview URL
-- Uses Preview env vars (pointing to Neon `dev`) for all previews
+| Current | GitHub Flow |
+|---------|-------------|
+| All PRs target `dev` | All PRs target `main` |
+| Neon `dev` branch (shared, all previews) | Per-PR ephemeral Neon branch |
+| `dev` → `main` periodic promotion | Eliminated |
+| `main` auto-deploys to production | `main` auto-deploys to staging; manual promote to production |
+| No staging env | Lightweight staging env |
+| Branch protection on `main` + `dev` | Branch protection on `main` only |
 
-### Coordinator Update
-
-Update the coordinator prompt:
-- PRs target `main` (not `dev`)
-- No dev→main promotion step
-- Branch protection check is on `main`
-
-## Why This Works for AI Agent Teams
-
-| Factor | Traditional GitFlow | GitHub Flow (AI team) |
-|--------|--------------------|-----------------------|
-| Local dev needed? | Yes | No — agents don't run local environments |
-| Integration testing | Shared `dev` branch | CI + isolated PR previews |
-| Merge complexity | Two-step (PR → dev → main) | One-step (PR → main) |
-| Agent mental model | Must know to target `dev` | Always target `main` |
-| Conflict surface | Agents pile up in `dev` | Each PR is isolated |
-| Open source parity | Diverges | Matches — anyone can contribute a PR |
-
-The key insight: AI agents are like open source contributors. No one gives an OSS contributor a shared dev environment — they fork, branch, PR. Same model works perfectly here.
+**To migrate:**
+1. Update coordinator: PRs target `main`
+2. Add GitHub Actions workflow for per-PR Neon branch lifecycle
+3. Set up staging Vercel project (or deployment protection)
+4. Remove `dev` branch protection / archive `dev` branch
 
 ## Lessons & Gotchas
 
-**"What about testing multiple PRs together before production?"**
-With isolated PR previews, you test each change independently. This is actually safer — you know exactly what each merge introduces. Combine with solid CI (build + tests) and post-merge monitoring.
+**Per-PR ephemeral DB runs schema migrations on PR open.** The migration must be additive/backward-compatible — production DB (from which the branch schema is derived) must be able to run alongside both old and new code. Breaking schema changes require a multi-step migration strategy.
 
-**"The Neon `dev` branch is shared across all PR previews"**
-All simultaneous PR previews share the same `dev` database. If two PRs run schema migrations, they could conflict. Mitigation: Atlas migrations are declarative (not sequential), reducing conflict risk. Monitor preview DB health.
+**Staging DB can drift from production over time.** Refresh staging from production snapshot periodically (weekly or before major deploys).
 
-**"What if main breaks?"**
-With direct-to-main merges, main breaking = production breaking. Mitigations:
-1. Required CI (`build` check) must pass before merge
-2. Gatekeeper must approve — no auto-merge
-3. Post-merge monitoring on main CI
-4. Fast rollback: revert the squash commit
+**Don't send clients to PR preview URLs.** Use the dedicated staging domain for external reviews. PR previews are for developer/agent testing only.
 
-**Don't confuse git `dev` branch with Neon `dev` branch:**
-- Git `dev` branch → removed (no longer needed)
-- Neon `dev` database branch → keep (PR previews need a non-production DB)
+**The `dev` Neon branch becomes obsolete.** With per-PR branches, the shared `dev` Neon branch is no longer needed. Keep it briefly as fallback during migration, then remove.
