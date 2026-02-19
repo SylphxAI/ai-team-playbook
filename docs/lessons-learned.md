@@ -52,6 +52,18 @@ Hard-won lessons from V3 and V4. Each cost real time, tokens, or production upti
 
 - **Parallel agents create conflicting migrations.** If using sequential migration files (e.g., Drizzle `0004_*.sql`), multiple builders collide. Fix: timestamp-based naming (`20260212_143022_*.sql`), declarative migrations (Atlas), or push-based development (`drizzle-kit push`).
 
+## Vercel + Turborepo
+
+- **Monorepo + multiple Vercel projects = build explosion.** Every push triggers builds on ALL connected Vercel projects, even if only one app changed. With agents merging 20+ PRs/day: 300+ wasted/failed builds, 72+ hours of build minutes, ~$30/day in costs. Fix immediately when connecting a new monorepo to Vercel.
+- **`npx turbo-ignore` is the fix.** Set `commandForIgnoringBuildStep: "npx turbo-ignore"` on every Vercel project in a Turborepo monorepo. This checks whether the specific app actually changed before proceeding with the build. No `--fallback` flag needed.
+- **Make it a checklist item, not an afterthought.** This must be set at project creation time, not discovered when the build bill arrives. See [New Project](new-project.md) and [Environments](environments.md).
+
+## Prompt Design
+
+- **Rule-based prompts get gamed.** "Find minimum 8 issues" → agent finds 8 issues, most not worth filing. "Reject issues with these keywords" → agent rephrases to avoid the keywords. Rules tell agents what to do; principles require them to think.
+- **Principle-based prompts: core question + lenses + examples.** Instead of keyword lists and MUST/NEVER rules, give agents: (1) the single question they're answering, (2) 2-3 analytical lenses to apply, (3) one example of great output and one example of bad output with explanation. This produces dramatically better signal-to-noise.
+- **Good/bad examples outperform rules.** An agent shown "this is what a bad Scout issue looks like, here's why" will generalize correctly to new situations. A rule-list agent satisfies the letter of each rule while missing the spirit entirely.
+
 ## Meta
 
 - **Write it down.** "Mental notes" don't survive agent restarts. Log rejections, failures, and patterns. Feed them back into prompts. Agents only learn from written history.

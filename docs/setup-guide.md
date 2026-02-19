@@ -6,11 +6,11 @@ Step-by-step guide to set up an autonomous AI agent team for one or more project
 
 - One or more GitHub repos (public or private)
 - [OpenClaw](https://github.com/nicepkg/openclaw) instance running
-- Two GitHub user accounts (one for Builders/Scout/Tester, one for Gatekeeper)
+- Two GitHub user accounts (one for builders/scouts/testers, one for gatekeepers)
 
-## 1. Git Identity Setup (Real User Accounts)
+## 1. Git Identity Setup
 
-Agents use real GitHub user accounts — not GitHub Apps or bots.
+Agents use two real GitHub user accounts — no GitHub Apps needed.
 
 | Role | GitHub Account | Identity |
 |------|---------------|----------|
@@ -19,46 +19,56 @@ Agents use real GitHub user accounts — not GitHub Apps or bots.
 | Tester | shtse8 | Kyle Tse / shtse8@gmail.com |
 | Gatekeeper | claw-sylphx | Clayton Shaw / clayton@sylphx.com |
 
-**Why two accounts?** Branch protection requires the reviewer to be a different account than the PR author. Scout, Builder, and Tester open PRs as `shtse8`; Gatekeeper reviews and merges as `claw-sylphx`.
+Why two accounts? Branch protection requires the reviewer to be a different account than the PR author. Scout/Builder/Tester all open PRs → Gatekeeper reviews and merges.
 
-**Why real accounts instead of GitHub Apps?**
-- Simpler setup — no App ID, no private key, no token generation script
+**Why real user accounts instead of GitHub Apps?**
+- Simpler setup — no app registration, no private keys, no token refresh
 - Commits show on Kyle's GitHub profile (green squares)
-- No GitHub App token complexity or 1-hour expiry headaches
-- Trade-off: shared identity across roles (acceptable — roles don't conflict)
+- `gh` CLI handles auth switching natively
+- Trade-off: tokens don't auto-expire like GitHub App tokens
 
 ### Setup
 
-Both accounts must be authenticated in `gh` CLI:
+Both accounts must be authenticated in the `gh` CLI:
 
 ```bash
-# Authenticate both accounts (one-time setup)
-gh auth login --hostname github.com  # log in as shtse8
-gh auth login --hostname github.com  # log in as claw-sylphx
+# Authenticate each account (done once)
+gh auth login --hostname github.com   # follow prompts for shtse8
+gh auth login --hostname github.com   # follow prompts for claw-sylphx
 
 # List authenticated accounts
-gh auth status
+gh auth list
 
-# Switch between accounts
-gh auth switch --user shtse8
-gh auth switch --user claw-sylphx
-```
-
-At agent spawn time, set the correct identity before any git operations:
-
-**For Scout, Builder, Tester:**
-```bash
+# Switch to the builder/scout/tester account
 gh auth switch --user shtse8
 git config --global user.name "Kyle Tse"
 git config --global user.email "shtse8@gmail.com"
-```
 
-**For Gatekeeper:**
-```bash
+# Switch to the gatekeeper account
 gh auth switch --user claw-sylphx
 git config --global user.name "Clayton Shaw"
 git config --global user.email "clayton@sylphx.com"
 ```
+
+Add account switching to agent spawn templates:
+
+```bash
+# Builder/Scout/Tester agents:
+gh auth switch --user shtse8
+git config --global user.name "Kyle Tse"
+git config --global user.email "shtse8@gmail.com"
+
+# Gatekeeper agent:
+gh auth switch --user claw-sylphx
+git config --global user.name "Clayton Shaw"
+git config --global user.email "clayton@sylphx.com"
+```
+
+### Account Permissions
+
+Both accounts need to be added to the GitHub org with appropriate permissions:
+- `shtse8` — member with write access to all target repos
+- `claw-sylphx` — member with write access to all target repos (needs merge permission)
 
 ## 2. Branch Protection
 
@@ -164,7 +174,7 @@ Create a prompt file that includes:
 1. The list of all repos to manage
 2. The 6-step algorithm (inventory → check repos → prioritize → spawn deficit → CI check → summary)
 3. Roster table (role, key, desired count)
-4. Spawn templates for each role
+4. Spawn templates for each role (including account switching)
 
 Key principles:
 - Agents are **not assigned to repos** — they pick work by priority across all repos
@@ -215,20 +225,20 @@ for REPO in "org/repo-a" "org/repo-b" "org/repo-c"; do
   gh label create "source/scout" --repo $REPO --color "7057FF" --force
   gh label create "source/gatekeeper" --repo $REPO --color "E4E669" --force
   # Type
-  gh label create "type/architecture" --repo $REPO --color "0052CC" --force
-  gh label create "type/optimization" --repo $REPO --color "0075CA" --force
-  gh label create "type/ux" --repo $REPO --color "CC317C" --force
+  gh label create "type/architecture" --repo $REPO --color "1D76DB" --force
+  gh label create "type/optimization" --repo $REPO --color "1D76DB" --force
+  gh label create "type/ux" --repo $REPO --color "1D76DB" --force
   gh label create "type/security" --repo $REPO --color "B60205" --force
   gh label create "type/growth" --repo $REPO --color "0E8A16" --force
   gh label create "type/quality" --repo $REPO --color "E4E669" --force
-  gh label create "type/infra" --repo $REPO --color "1D76DB" --force
-  gh label create "type/bug" --repo $REPO --color "D73A4A" --force
-  gh label create "type/enhancement" --repo $REPO --color "A2EEEF" --force
+  gh label create "type/infra" --repo $REPO --color "666666" --force
+  gh label create "type/bug" --repo $REPO --color "D93F0B" --force
+  gh label create "type/enhancement" --repo $REPO --color "84B6EB" --force
   # Size
-  gh label create "size/XS" --repo $REPO --color "F9D0C4" --force
-  gh label create "size/S" --repo $REPO --color "F9D0C4" --force
-  gh label create "size/M" --repo $REPO --color "F9D0C4" --force
-  gh label create "size/L" --repo $REPO --color "F9D0C4" --force
+  gh label create "size/XS" --repo $REPO --color "C5DEF5" --force
+  gh label create "size/S" --repo $REPO --color "C5DEF5" --force
+  gh label create "size/M" --repo $REPO --color "FBCA04" --force
+  gh label create "size/L" --repo $REPO --color "D93F0B" --force
   # Workflow
   gh label create "in-progress" --repo $REPO --color "1D76DB" --force
   gh label create "fixing" --repo $REPO --color "D93F0B" --force
@@ -239,8 +249,9 @@ done
 
 Before going live:
 
-- [ ] Both GitHub accounts (`shtse8`, `claw-sylphx`) authenticated in `gh` CLI
-- [ ] Account switching tested: `gh auth switch --user shtse8` and `gh auth switch --user claw-sylphx`
+- [ ] Both GitHub accounts authenticated in `gh` CLI (`gh auth list`)
+- [ ] `shtse8` has write access to all target repos
+- [ ] `claw-sylphx` has write access to all target repos (with merge permission)
 - [ ] Branch protection configured on `dev` branch (all repos)
 - [ ] Squash merge only, auto-delete branches (all repos)
 - [ ] CI workflow committed to all repos
@@ -249,17 +260,17 @@ Before going live:
 - [ ] Coordinator prompt written with all repos listed
 - [ ] Cron job created in OpenClaw (start disabled, enable after testing)
 - [ ] Test: manually trigger coordinator, verify it spawns agents
-- [ ] Test: verify Builder can push to all repos as shtse8
-- [ ] Test: verify Gatekeeper can approve+merge on all repos as claw-sylphx
+- [ ] Test: verify builder (shtse8) can push to all repos
+- [ ] Test: verify gatekeeper (claw-sylphx) can approve + merge PRs
 
 ## Scaling
 
 | Symptom | Fix |
 |---------|-----|
-| PR queue growing | Gatekeeper is bottleneck — check for stuck PRs |
+| PR queue growing | Check Gatekeeper — may need to spawn more review sessions |
 | Approved issues piling up | Add Builders |
 | PRs waiting for tests | Add Testers |
-| Low-quality issues | Gatekeeper is working — check Scout prompt |
+| Low-quality issues | Gatekeeper rejection rate — check Scout methodology |
 | One repo starving | Check priority balance, consider priority boost |
 
 Start with the default roster (8 agents). Adjust after observing bottlenecks.
