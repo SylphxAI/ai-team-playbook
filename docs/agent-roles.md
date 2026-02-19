@@ -1,97 +1,195 @@
 # Agent Roles
 
-6 directions, 8 agents. Split by cognitive mode, not technical domain.
+4 roles, 8 agents. Each role answers a single core question.
 
 ## Roster
 
-| # | Direction | Key | Count |
-|---|-----------|-----|-------|
-| 1 | Product | `product` | 1 |
-| 2 | Audit | `audit` | 1 |
-| 3 | Triage | `triage` | 1 |
-| 4 | Build | `builder` | 3 |
-| 5 | Test | `tester` | 1 |
-| 6 | Review | `reviewer` | 1 |
+| # | Role | Key | Count |
+|---|------|-----|-------|
+| 1 | Scout | `scout` | 1 |
+| 2 | Gatekeeper | `gatekeeper` | 1 |
+| 3 | Builder | `builder` | 5 |
+| 4 | Tester | `tester` | 1 |
 | | **Total** | | **8** |
 
-## Role Briefs
+---
 
-### Issue Creators — find problems, file issues, never write code.
+## Scout (×1)
 
-**Product** (×1):
-- Competitive analysis, feature gaps, market positioning, differentiation
-- User journeys, personas, pain points, retention, churn, NPS
-- Viral loops, sharing incentives, referral mechanics, network effects
-- Monetization: ads, subscriptions, freemium, in-app purchases, partnerships
-- Acquisition channels, conversion funnels, growth experiments, A/B testing
-- Content strategy, trending topics, UGC, editorial pipeline, curation
-- Roadmap prioritization, feature scoring, launch strategy, phased rollouts
-- Pricing, tiers, free vs paid, trials, upsells, LTV
-- Legal, compliance, privacy, GDPR, COPPA
-- Brand, identity, voice, positioning, trust signals
-- Mobile-first, PWA, app store, responsive, offline-capable
+**Core question:** "What is the single most impactful thing we could change right now to get closer to world-class?"
 
-**Audit** (×1) — replaces former Improve + Secure + Perf:
-- Refactoring: DRY, SOLID, design patterns, naming, barrel files
-- Type safety: eliminate `any`, Zod schemas, generics, narrowing
-- Dead code: unused imports, exports, files, dependencies, feature flags
-- Error handling: boundaries, logging, monitoring, alerting, recovery
-- Documentation: README, JSDoc, API docs, architecture decisions
-- SEO: meta tags, structured data, sitemap, Open Graph, robots.txt
-- Accessibility: WCAG, ARIA, keyboard nav, screen readers, contrast
-- i18n: string extraction, locale routing, RTL, date/number formatting
-- Dependencies: updates, CVEs, supply chain, lockfile integrity
-- Injection: XSS, SQL, NoSQL, command, SSRF, path traversal
-- Auth: bypass, privilege escalation, session fixation, token leakage
-- Data: PII exposure, debug endpoints, IDOR, mass assignment
-- Transport: CORS, CSP, HSTS, cookie flags, certificate pinning
-- Input: validation, sanitization, output encoding, file upload limits
-- Rate limiting: enumeration, API abuse, DDoS vectors
-- Secrets: hardcoded keys, env leaks, .env exposure, git history
-- Core Web Vitals: LCP, FID, CLS, INP, TTFB
-- Bundle: size analysis, tree shaking, code splitting, lazy loading
-- Assets: image optimization, WebP/AVIF, font loading, CDN, caching
-- Database: N+1 queries, missing indexes, connection pooling, pagination
-- Rendering: SSR, SSG, ISR, streaming, partial hydration, Suspense
-- Runtime: memory leaks, event listeners, main thread blocking, workers
+Merges the old Product + Audit roles, but adds something neither had: a mandatory outward look before touching the codebase. The Scout's job is to find issues that matter, not issues that are easy to find.
 
-### Triage — central quality gate for issues.
+### Methodology
 
-**Triage** (×1):
-- Review all open issues without `approved` or `rejected` label
-- Evaluate: real? valuable? clear enough for a builder? duplicate?
-- Approve → add `approved` label. Reject → add `rejected` + reason comment
-- Prioritize: `P0` (critical), `P1` (important), `P2` (nice-to-have)
-- Size: `XS`, `S`, `M`, `L`
-- Reject if: duplicate, out of scope, too vague, too large, already fixed
-- Decompose large issues into smaller approved sub-issues
+**Phase 1 — Look outward first (MANDATORY before touching code):**
+
+Research the competitive landscape using web search:
+- Who are the competitors and what are they doing better?
+- What content/engagement patterns are working right now?
+- What UX patterns do best-in-class products use?
+
+Goal: build a mental model of "great" so we can measure the gap. Without this, analysis defaults to linting the codebase — useful but not strategic.
+
+**Phase 2 — Three lenses on the product:**
+
+1. **First-time user** — What confuses? What breaks? Would you share this with a friend?
+2. **Investor evaluating** — Impressive? Professional? Differentiated from the alternatives?
+3. **Engineer maintaining for 2 years** — What patterns scare you? Where would adding a feature be painful?
+
+**Phase 3 — Argue both sides:**
+
+For each potential finding: make the case FOR filing it AND AGAINST. Only file if "for" clearly wins. This step exists to filter out issues that feel important but aren't.
+
+**Phase 4 — File only what passes this bar:**
+- Can articulate real-world impact in one sentence
+- Has specific evidence (files, code, competitor comparison)
+- Fixing this would noticeably improve the product
+- Not already covered by an open issue
+
+### Good vs Bad Output
+
+**Great Scout issue:**
+> **Title:** Result page share flow drops 80% of potential shares — no native share API, no pre-filled message, 3 taps too many
+>
+> **Body:** `src/components/ResultShare.tsx` — current flow requires: copy link → open app → paste → compose. Competitors (Duolingo, Quizlet) use Web Share API: 1 tap, pre-filled message, works on all platforms. Suggested approach: implement `navigator.share()` with clipboard fallback for desktop.
+
+Why great: specific file, quantified impact, competitor evidence, actionable path forward.
+
+**Bad Scout issue:**
+> **Title:** 🔒 Use constant-time comparison in auth middleware
+
+Why bad: Theoretical attack requiring thousands of carefully crafted requests in a controlled environment. A security scanner would file this. A strategic thinker would not — there is always something more impactful to fix. The Scout should be the strategic thinker, not the scanner.
+
+### Scope
+
+Everything the old Product and Audit agents covered, plus competitive intelligence:
+
+- Competitive analysis, feature gaps, market positioning
+- User journeys, pain points, retention, viral loops, monetization
+- Code quality: DRY, SOLID, type safety, dead code, error handling
+- Security: injection, auth, data exposure, transport, secrets
+- Performance: Core Web Vitals, bundle size, N+1 queries, rendering
+- Accessibility, SEO, i18n, documentation
+
+---
+
+## Gatekeeper (×1)
+
+**Core question:** "If I were the tech lead and this PR shipped to production, would anything keep me up at night?"
+
+Merges the old Triage + Reviewer roles. Single quality gate for both issues and code. If the Gatekeeper approves it, it ships.
+
+### Issue Triage
+
+Review all open issues without `pipeline/approved` or `pipeline/rejected` label:
+
+- Is this real? Valuable? Clear enough for a builder?
+- Is it a duplicate of an open or recently closed issue?
+- Approve → add `pipeline/approved` + priority label. Reject → add `pipeline/rejected` + comment with reason.
+- Priority: `priority/P0` (critical), `priority/P1` (important), `priority/P2` (nice-to-have), `priority/P3` (someday)
+- Size: `size/XS`, `size/S`, `size/M`, `size/L`
+- Decompose large issues (size/L) into smaller approved sub-issues when possible
 - Stale cleanup: `in-progress` + no linked PR after 30 min → remove label
 
-### Builders — fix failing PRs first, then build from approved issues. Code only, no tests.
+### PR Review Methodology
 
-**Build** (×3):
-- **P1 — Fix failing PRs**: find open PRs with failing CI, no `fixing` label. Claim with `fixing`. Fix code, push, remove label.
-- **P2 — Build from approved issues**: find issues with `approved`, no `in-progress`. Claim with `in-progress`. PR refs `Closes #N`.
-- Code only — tests added by Testers
-- Scope: pages, components, APIs, database, auth, payments, integrations, real-time, infrastructure
-- Lint before commit. Exit if nothing to do.
+**Consider:**
+- Is this the right approach, or just AN approach? Band-aids get approved because they "work."
+- Does this PR leave the codebase in a BETTER state than before?
+- What if 5 more PRs followed this same pattern? Patterns compound. Would the codebase be fine or a mess?
+- What's NOT in this PR that should be? Missing error handling? Missing edge cases?
 
-### Testers — write tests for open PRs. Adversarial mindset.
+**Merge rule:** approve + squash merge + delete branch ONLY when code AND tests pass CI.
 
-**Test** (×1):
-- Find open PRs lacking tests. Read the diff.
-- Write tests that BREAK it — adversarial, not confirmatory
-- Unit, integration, or E2E — pick based on the change
-- Focus: user-facing edge cases, what the builder missed, what breaks under load
-- Skip PRs with adequate tests. One PR per session.
+Uses `claw-sylphx` account (different identity from PR author — branch protection requirement).
 
-### Reviewers — quality gate + merge authority.
+### Good vs Bad Review
 
-**Review** (×1):
-- Correctness, security, performance, scope, style
-- Tests missing → comment "needs tests", do NOT reject (testers will add)
-- Merge rule: approve + squash merge + delete branch ONLY when code AND tests pass CI
-- Uses separate identity from builders (branch protection requirement)
+**Good review:**
+> "This fixes the bug, but the approach adds a third way to fetch user data — we already have `getUserById` and `fetchUser` in `src/lib/user.ts`. Before merging, consolidate into one? Otherwise we're making the duplication problem worse with every PR."
+
+Why good: identifies a real architectural issue, explains the compounding risk, proposes a clear fix.
+
+**Bad review:**
+> "LGTM ✅"
+
+> "Code looks clean, CI passes, approved."
+
+Why bad: these add zero value. Linters and CI already checked this. The Gatekeeper is there to catch what automated tools cannot.
+
+**Tests missing?** Comment "needs tests" — do NOT reject. The Tester will add them.
+
+---
+
+## Builder (×5)
+
+Fix failing PRs first, then build from approved issues. Code only — tests are added by Testers.
+
+### Priority Order
+
+1. **P0 — Fix failing PRs:** Find open PRs with failing CI that don't have a `fixing` label. Claim with `fixing`. Fix the code, push, remove label.
+2. **P1 — Build from approved issues:** Find issues with `pipeline/approved`, no `in-progress`. Claim with `in-progress`. Open a PR referencing `Closes #N`.
+
+### Rules
+
+- Code only — Testers write tests independently
+- Follow existing patterns EXACTLY — do not introduce new abstractions unless the issue says to
+- Lint before commit
+- Keep PRs focused — one issue per PR
+- Exit if nothing to do
+
+### Scope
+
+Pages, components, APIs, database, auth, payments, integrations, real-time, infrastructure.
+
+---
+
+## Tester (×1)
+
+**Core question:** "What test, if it had existed BEFORE this PR was written, would have caught the bug or forced a better design?"
+
+### Methodology
+
+Find open PRs without adequate tests. Read the diff. Think: how could this break in production?
+
+- What inputs did the developer not consider? (empty, null, huge, negative, concurrent)
+- What happens when external dependencies fail? (network timeout, 500, malformed response)
+- What would a malicious user try?
+
+Write tests that would BREAK the implementation — adversarial, not confirmatory.
+
+Pick: unit, integration, or E2E based on the change. One PR per session.
+
+### Good vs Bad Tests
+
+**Good test:**
+```typescript
+test("concurrent submissions with same anonymousId should not double-count", async () => {
+  // Two browser tabs submitting simultaneously — real production scenario
+  const results = await Promise.all([
+    submitQuiz({ anonymousId: "abc", answers: validAnswers }),
+    submitQuiz({ anonymousId: "abc", answers: validAnswers }),
+  ]);
+  expect(results.filter(r => r.status === 200).length).toBe(1);
+});
+```
+
+Why good: catches a real race condition the developer likely never tested. If the implementation has no deduplication logic, this test fails — which is the point.
+
+**Bad test:**
+```typescript
+test("submitQuiz returns 200", async () => {
+  const result = await submitQuiz({ answers: validAnswers });
+  expect(result.status).toBe(200);
+});
+```
+
+Why bad: catches nothing. The developer already knows it returns 200 for valid input. This test passes even if the implementation is completely wrong for any other case.
+
+**Rule of thumb:** If your test would still pass with a subtle but real bug, it's not testing the right thing. Skip PRs that already have adversarial test coverage.
+
+---
 
 ## Separate Testing Model
 
@@ -103,18 +201,17 @@ Builders write code only. Testers write tests independently on open PRs.
 | Blind spots | Author confirms own mental model | Fresh eyes catch what author missed |
 | Approach | Confirmatory | Adversarial |
 | Workflow | Sequential | Parallel (builder moves on, tester tests PR) |
-| Volunteer availability | Hard to find | Always available |
 
-**Trade-offs**: tester may misunderstand builder intent; may miss implementation-specific shortcuts. Acceptable — reviewers catch misalignment before merge.
+Trade-off: Tester may misunderstand builder intent; may miss implementation shortcuts. Acceptable — Gatekeeper catches misalignment before merge.
+
+---
 
 ## Design Rationale
 
-**Why Audit replaces Improve + Secure + Perf?** Code quality, security, and performance are intertwined. Dead code removal reduces attack surface AND bundle size. One agent with the full picture creates better issues than three with tunnel vision.
+**Why merge Product + Audit into Scout?** Both were creating issues, but from different angles. The problem: neither had context about the other. An Audit agent flagging a security issue didn't know the Product agent had already deprioritized that area. A single Scout with the full picture — competitive context, user experience, and code quality — creates better-prioritized, better-evidenced issues.
 
-**Why 3 Builders?** AI is fullstack — no frontend/backend split needed. 3 provides throughput; the bottleneck is Review and Triage, not raw code output.
+**Why merge Triage + Reviewer into Gatekeeper?** Both were quality gates. Triage filtered issues before build; Review filtered PRs before merge. The Gatekeeper has full context on what issues were approved and why — making PR review more coherent. Fewer handoffs, fewer lost-in-translation moments.
 
-**Why one generic Tester?** AI can write all test types. A tester reading a diff naturally knows whether it needs unit, integration, or E2E tests.
+**Why 5 Builders?** AI is fullstack — no frontend/backend split needed. 5 provides throughput without overwhelming the single Gatekeeper. The bottleneck is review capacity, not raw code output.
 
-**Why Triage?** Without it, builders pick up vague/duplicate issues and waste cycles. Triage dropped wasted work by 30-50%.
-
-**Why Review merges?** Reviewer already has full context from reading the code. Natural merge point. Removes merge responsibility from coordinator.
+**Why principle-based prompts?** Rule-based prompts get gamed. An agent given "minimum 8 findings" will find 8 findings regardless of whether they're worth filing. An agent asked "what is the single most impactful thing?" has to think. Checklists produce checklist output. Questions produce thought.

@@ -24,6 +24,7 @@
 - [ ] Import project to Vercel (Sylphx team)
 - [ ] Connect GitHub repo
 - [ ] Set Production branch to `main`
+- [ ] **If this is a Turborepo monorepo:** set Ignored Build Step to `npx turbo-ignore` on EVERY Vercel project connected to this repo (see [Environments](environments.md)). This is mandatory — skipping it causes hundreds of wasted builds per day.
 - [ ] Set environment variables separately:
   - **Production target**: production DATABASE_URL, real API keys
   - **Preview target**: dev DATABASE_URL, dev API keys

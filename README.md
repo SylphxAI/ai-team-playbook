@@ -1,6 +1,6 @@
 # AI Team Playbook
 
-Run an autonomous AI-agent development team. 8 agents, 6 directions, zero human code.
+Run an autonomous AI-agent development team. 8 agents, 4 roles, zero human code.
 
 Patterns from shipping production apps across multiple repos — but the architecture is generic. Swap the project context, keep the playbook.
 
@@ -15,8 +15,7 @@ Patterns from shipping production apps across multiple repos — but the archite
         ↕                ↕                ↕
 ┌──────────────────────────────────────────────────────────────┐
 │                   AGENT FLEET (8 instances)                   │
-│   Product(1) · Audit(1) · Triage(1) · Build(3)              │
-│   Test(1) · Review(1)                                        │
+│   Scout(1) · Gatekeeper(1) · Builder(5) · Tester(1)         │
 │         Agents pick work from ANY repo by priority           │
 └──────────────────────────────────────────────────────────────┘
         ↕                ↕                ↕
@@ -32,18 +31,17 @@ Patterns from shipping production apps across multiple repos — but the archite
 
 **One coordinator, one team, multiple repos.** See [Multi-Project](docs/multi-project.md) for why.
 
-## Roster — 6 Directions, 8 Agents
+## Roster — 4 Roles, 8 Agents
 
-| Direction | Key | Count | Mode |
-|-----------|-----|-------|------|
-| Product | `product` | 1 | Create issues — features, strategy, monetization |
-| Audit | `audit` | 1 | Create issues — code quality, security, performance |
-| Triage | `triage` | 1 | Approve/reject/prioritize issues |
-| Build | `builder` | 3 | Fix failing PRs first, then build from approved issues |
-| Test | `tester` | 1 | Write tests for open PRs (adversarial) |
-| Review | `reviewer` | 1 | Review PRs + merge when code+tests+CI pass |
+| Role | Key | Count | Summary |
+|------|-----|-------|---------|
+| Scout | `scout` | 1 | Competitive research + multi-dimensional codebase analysis → files prioritized issues |
+| Gatekeeper | `gatekeeper` | 1 | Issue triage + deep PR review + squash merge |
+| Builder | `builder` | 5 | Fix failing PRs first, then build from approved issues |
+| Tester | `tester` | 1 | Adversarial tests for open PRs |
 
-**Audit** = merged Improve + Secure + Perf. Code quality, security, and performance overlap too much for separate agents.
+Scout = Product + Audit merged (but more than both — adds competitive research and a strategic lens).
+Gatekeeper = Triage + Reviewer merged (single quality gate for both issues and code).
 
 ## Core Design
 
@@ -51,10 +49,10 @@ Patterns from shipping production apps across multiple repos — but the archite
 - **Git is the only coordination.** Issues, PRs, labels (`in-progress`, `fixing`). Nothing else.
 - **Coordinator is a reconciler.** Maintains fleet size + checks CI. Does not merge, review, or assign work.
 - **Multi-repo by default.** One coordinator scans all repos, agents pick work by priority.
-- **Generic briefs + project context.** Role briefs are reusable keyword lists. Project context comes from each repo's `CLAUDE.md`.
+- **Principle-based prompts, not checklists.** Rule-based prompts get gamed; agents satisfy the letter, not the spirit. Principle-based prompts (core question + lenses + good/bad examples) require genuine thought.
 - **Separate testing.** Builders write code only. Testers write tests independently on open PRs.
 - **Builders fix first, build second.** Failing PRs = P0. New features from approved issues = P2.
-- **Reviewers merge.** The agent who reviewed the code merges it. No separate merger role.
+- **Gatekeeper merges.** The agent who reviewed the code merges it.
 - **Idle agents exit.** Nothing to do → gone in under a minute.
 
 ## Coordinator Algorithm
@@ -72,18 +70,33 @@ Runs every 5 minutes. Stateless, idempotent.
 
 ## Prompt Architecture
 
-Every agent prompt = **repo context** (from `CLAUDE.md`) + **role brief** (~200-400 bytes).
+Every agent prompt = **repo context** (from `CLAUDE.md`) + **role brief** (principle-based, ~400-600 bytes).
 
 - **Repo context**: read from the target repo's `CLAUDE.md` at spawn time. Each repo defines its own stack, conventions, and goals.
-- **Role brief**: keyword clusters covering all aspects of the direction. Generic, project-agnostic.
+- **Role brief**: core question + analytical lenses + examples of good vs bad output. Generic, project-agnostic.
 
 Agents are not assigned to repos — they pick work from any repo based on priority.
+
+## Git Identities
+
+Two real GitHub user accounts (not GitHub Apps):
+
+| Role | GitHub Account | Identity |
+|------|---------------|----------|
+| Scout | shtse8 | Kyle Tse / shtse8@gmail.com |
+| Builder | shtse8 | Kyle Tse / shtse8@gmail.com |
+| Tester | shtse8 | Kyle Tse / shtse8@gmail.com |
+| Gatekeeper | claw-sylphx | Clayton Shaw / clayton@sylphx.com |
+
+Switch accounts with: `gh auth switch --user <account>`
+
+Branch protection requires reviewer to be different from PR author — hence two accounts.
 
 ## Docs
 
 | File | Content |
 |------|---------|
-| [Agent Roles](docs/agent-roles.md) | Role briefs, testing model, design rationale |
+| [Agent Roles](docs/agent-roles.md) | Role briefs, methodology, good/bad examples |
 | [Setup Guide](docs/setup-guide.md) | How to set up this workflow (single or multi-project) |
 | [Multi-Project](docs/multi-project.md) | How one team works across multiple repos |
 | [Lessons Learned](docs/lessons-learned.md) | Hard-won lessons from V3 and V4 |

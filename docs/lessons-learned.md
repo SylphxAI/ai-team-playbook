@@ -56,3 +56,15 @@ Hard-won lessons from V3 and V4. Each cost real time, tokens, or production upti
 
 - **Write it down.** "Mental notes" don't survive agent restarts. Log rejections, failures, and patterns. Feed them back into prompts. Agents only learn from written history.
 - **Keywords beat narratives in prompts.** Dense keyword clusters give AI better scope understanding than prose paragraphs. Minimum words, maximum coverage.
+
+## Vercel + Turborepo
+
+- **Turborepo monorepos without `turbo-ignore` burn build minutes at scale.** Every push triggers builds on ALL connected Vercel projects, even if only one app changed. With agents merging 20+ PRs/day: 300+ failed builds = 72 hours of wasted build minutes = ~$30/day. Fix: set `commandForIgnoringBuildStep: "npx turbo-ignore"` on every Vercel project. This is now a mandatory convention — see [Environments](environments.md).
+- **Set `turbo-ignore` before you accumulate build history.** The cost compounds silently. You won't notice until you check the Vercel usage dashboard and see thousands of wasted build minutes. Do it when connecting a new project, not after.
+- **`npx turbo-ignore` (no flags) is correct.** Earlier docs referenced `--fallback=HEAD~1`. That flag is unnecessary and was removed from turbo-ignore's default behavior. Use the plain command.
+
+## Prompt Design
+
+- **Principle-based prompts outperform rule-based prompts.** Rule-based prompts (keyword lists, "MUST do X", numerical quotas like "minimum 8 findings") get gamed: agents produce the required output regardless of quality. Principle-based prompts (a core question, three lenses, good/bad examples, self-argumentation) require genuine thought. The agent has to justify each output, which filters out noise and increases signal.
+- **Numerical quotas produce exactly that many outputs — good or bad.** "File at least 8 issues per run" → 8 issues filed, including low-value theoretical findings that waste builder time. Remove quotas. Replace with: "only file what passes this specific bar."
+- **Good/bad examples are more effective than anti-pattern lists.** Showing a concrete example of a great Scout issue and a concrete example of a bad one teaches more than listing 10 things to avoid. Examples are memorable; lists are not.

@@ -6,81 +6,59 @@ Step-by-step guide to set up an autonomous AI agent team for one or more project
 
 - One or more GitHub repos (public or private)
 - [OpenClaw](https://github.com/nicepkg/openclaw) instance running
-- GitHub org (for GitHub App — or use fine-grained PAT as alternative)
+- Two GitHub user accounts (one for Builders/Scout/Tester, one for Gatekeeper)
 
-## 1. GitHub App Setup (Bot Identity)
+## 1. Git Identity Setup (Real User Accounts)
 
-Agents need a separate identity from your personal account. Two options:
+Agents use real GitHub user accounts — not GitHub Apps or bots.
 
-### Option A: GitHub App (recommended)
+| Role | GitHub Account | Identity |
+|------|---------------|----------|
+| Scout | shtse8 | Kyle Tse / shtse8@gmail.com |
+| Builder | shtse8 | Kyle Tse / shtse8@gmail.com |
+| Tester | shtse8 | Kyle Tse / shtse8@gmail.com |
+| Gatekeeper | claw-sylphx | Clayton Shaw / clayton@sylphx.com |
 
-No seat cost. Commits show as `app-name[bot]`. Scoped permissions. Auto-expiring tokens (1h).
+**Why two accounts?** Branch protection requires the reviewer to be a different account than the PR author. Scout, Builder, and Tester open PRs as `shtse8`; Gatekeeper reviews and merges as `claw-sylphx`.
 
-**Create two apps** (builder + reviewer) — branch protection requires approval from a different account than the PR author.
+**Why real accounts instead of GitHub Apps?**
+- Simpler setup — no App ID, no private key, no token generation script
+- Commits show on Kyle's GitHub profile (green squares)
+- No GitHub App token complexity or 1-hour expiry headaches
+- Trade-off: shared identity across roles (acceptable — roles don't conflict)
 
-1. Go to **GitHub Org Settings → Developer Settings → GitHub Apps → New GitHub App**
-2. App name: `yourproject-builder` (and `yourproject-reviewer`)
-3. Homepage URL: your repo URL
-4. Uncheck "Webhook → Active" (not needed)
-5. Permissions:
+### Setup
 
-| Permission | Builder | Reviewer |
-|------------|---------|----------|
-| Contents | Write | Read |
-| Pull requests | Write | Write |
-| Issues | Write | Read |
-| Checks | Write | Read |
-| Commit statuses | Write | Read |
-| Metadata | Read | Read |
+Both accounts must be authenticated in `gh` CLI:
 
-6. "Where can this app be installed?" → Only on this account
-7. **Generate a private key** → save as `.pem` file
-8. Note the **App ID** from the app settings page
-9. **Install** the app on **all target repos** (important for multi-project setup)
-10. Note the **Installation ID** from the URL after installing (`/installations/XXXXX`)
-
-**Generate tokens:**
 ```bash
-npx github-app-installation-token \
-  --appId APP_ID \
-  --installationId INSTALL_ID \
-  --key /path/to/private-key.pem
+# Authenticate both accounts (one-time setup)
+gh auth login --hostname github.com  # log in as shtse8
+gh auth login --hostname github.com  # log in as claw-sylphx
+
+# List authenticated accounts
+gh auth status
+
+# Switch between accounts
+gh auth switch --user shtse8
+gh auth switch --user claw-sylphx
 ```
 
-Or write a script:
-```javascript
-const { createAppAuth } = require('@octokit/auth-app');
-const auth = createAppAuth({
-  appId: process.env.GITHUB_APP_ID,
-  privateKey: fs.readFileSync('/path/to/key.pem', 'utf8'),
-  installationId: process.env.GITHUB_APP_INSTALLATION_ID,
-});
-const { token } = await auth({ type: 'installation' });
-// Token valid for 1 hour
-```
+At agent spawn time, set the correct identity before any git operations:
 
-Usage in agent prompts:
+**For Scout, Builder, Tester:**
 ```bash
-export GH_TOKEN=$(node /path/to/gh-app-token.js builder)
-gh auth setup-git
+gh auth switch --user shtse8
+git config --global user.name "Kyle Tse"
+git config --global user.email "shtse8@gmail.com"
 ```
 
-### Option B: Fine-Grained PAT (simpler, trade-offs)
-
-- Commits show as your personal account
-- Costs a seat if you create a separate machine user
-- Simpler setup — just generate a token in GitHub settings
-
-Go to **Settings → Developer Settings → Personal Access Tokens → Fine-grained tokens**. Grant repo permissions equivalent to the table above.
-
-### App Limitations
-
-GitHub App tokens **cannot**:
-- Read branch protection rules (403)
-- Override third-party commit statuses (e.g., Vercel)
-- Access repo settings
-
-Use a personal account for these operations when needed.
+**For Gatekeeper:**
+```bash
+gh auth switch --user claw-sylphx
+git config --global user.name "Clayton Shaw"
+git config --global user.email "clayton@sylphx.com"
+```
 
 ## 2. Branch Protection
 
@@ -174,7 +152,7 @@ Brief description of what this project does.
 - Important paths agents should know about
 ```
 
-When the coordinator spawns an agent for a specific repo, the agent reads that repo's `CLAUDE.md` first. This replaces the old approach of embedding project context in the coordinator prompt.
+When the coordinator spawns an agent for a specific repo, the agent reads that repo's `CLAUDE.md` first.
 
 ## 5. Unified Coordinator Setup
 
@@ -185,7 +163,7 @@ The coordinator runs as **one cron job** managing **all repos** (see [Multi-Proj
 Create a prompt file that includes:
 1. The list of all repos to manage
 2. The 6-step algorithm (inventory → check repos → prioritize → spawn deficit → CI check → summary)
-3. Roster table (direction, key, desired count)
+3. Roster table (role, key, desired count)
 4. Spawn templates for each role
 
 Key principles:
@@ -221,23 +199,39 @@ Or configure via `openclaw.json`:
 
 ## 6. Labels
 
-Minimal label set. **Apply to every repo:**
+Apply to every repo:
 
 ```bash
 for REPO in "org/repo-a" "org/repo-b" "org/repo-c"; do
+  # Pipeline
+  gh label create "pipeline/approved" --repo $REPO --color "0E8A16" --force
+  gh label create "pipeline/rejected" --repo $REPO --color "B60205" --force
   # Priority
-  gh label create "p0-critical" --repo $REPO --color "B60205" --force
-  gh label create "p1-high" --repo $REPO --color "D93F0B" --force
-  gh label create "p2-medium" --repo $REPO --color "FBCA04" --force
-  gh label create "p3-low" --repo $REPO --color "C5DEF5" --force
+  gh label create "priority/P0" --repo $REPO --color "B60205" --force
+  gh label create "priority/P1" --repo $REPO --color "D93F0B" --force
+  gh label create "priority/P2" --repo $REPO --color "FBCA04" --force
+  gh label create "priority/P3" --repo $REPO --color "C5DEF5" --force
+  # Source
+  gh label create "source/scout" --repo $REPO --color "7057FF" --force
+  gh label create "source/gatekeeper" --repo $REPO --color "E4E669" --force
+  # Type
+  gh label create "type/architecture" --repo $REPO --color "0052CC" --force
+  gh label create "type/optimization" --repo $REPO --color "0075CA" --force
+  gh label create "type/ux" --repo $REPO --color "CC317C" --force
+  gh label create "type/security" --repo $REPO --color "B60205" --force
+  gh label create "type/growth" --repo $REPO --color "0E8A16" --force
+  gh label create "type/quality" --repo $REPO --color "E4E669" --force
+  gh label create "type/infra" --repo $REPO --color "1D76DB" --force
+  gh label create "type/bug" --repo $REPO --color "D73A4A" --force
+  gh label create "type/enhancement" --repo $REPO --color "A2EEEF" --force
+  # Size
+  gh label create "size/XS" --repo $REPO --color "F9D0C4" --force
+  gh label create "size/S" --repo $REPO --color "F9D0C4" --force
+  gh label create "size/M" --repo $REPO --color "F9D0C4" --force
+  gh label create "size/L" --repo $REPO --color "F9D0C4" --force
   # Workflow
-  gh label create "approved" --repo $REPO --color "0E8A16" --force
-  gh label create "rejected" --repo $REPO --color "B60205" --force
   gh label create "in-progress" --repo $REPO --color "1D76DB" --force
   gh label create "fixing" --repo $REPO --color "D93F0B" --force
-  # Source
-  gh label create "product" --repo $REPO --color "7057FF" --force
-  gh label create "audit" --repo $REPO --color "E4E669" --force
 done
 ```
 
@@ -245,8 +239,8 @@ done
 
 Before going live:
 
-- [ ] GitHub App(s) created and installed on **all target repos**
-- [ ] Token generation script working
+- [ ] Both GitHub accounts (`shtse8`, `claw-sylphx`) authenticated in `gh` CLI
+- [ ] Account switching tested: `gh auth switch --user shtse8` and `gh auth switch --user claw-sylphx`
 - [ ] Branch protection configured on `dev` branch (all repos)
 - [ ] Squash merge only, auto-delete branches (all repos)
 - [ ] CI workflow committed to all repos
@@ -255,17 +249,17 @@ Before going live:
 - [ ] Coordinator prompt written with all repos listed
 - [ ] Cron job created in OpenClaw (start disabled, enable after testing)
 - [ ] Test: manually trigger coordinator, verify it spawns agents
-- [ ] Test: verify builder can push to all repos
-- [ ] Test: verify reviewer can approve+merge on all repos
+- [ ] Test: verify Builder can push to all repos as shtse8
+- [ ] Test: verify Gatekeeper can approve+merge on all repos as claw-sylphx
 
 ## Scaling
 
 | Symptom | Fix |
 |---------|-----|
-| PR queue growing | Add Review agents |
+| PR queue growing | Gatekeeper is bottleneck — check for stuck PRs |
 | Approved issues piling up | Add Builders |
 | PRs waiting for tests | Add Testers |
-| Low-quality issues | Triage is working — check Audit/Product prompts |
+| Low-quality issues | Gatekeeper is working — check Scout prompt |
 | One repo starving | Check priority balance, consider priority boost |
 
 Start with the default roster (8 agents). Adjust after observing bottlenecks.
