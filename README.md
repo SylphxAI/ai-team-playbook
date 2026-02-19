@@ -12,6 +12,7 @@ A collection of skills for running autonomous AI agent development teams.
 | [Atlas Migrations](skills/atlas-migrations/) | Declarative schema management |
 | [Branch Strategy](skills/branch-strategy/) | Branching model, protection rules, merge strategy |
 | [Principle-Based Prompting](skills/principle-based-prompting/) | Writing AI prompts that force genuine thinking |
+| [GitHub Flow](skills/github-flow/) | PR-first workflow — no dev branch, PR preview = staging |
 
 ## Philosophy
 
