@@ -60,8 +60,8 @@ size/XS                 size/S               size/M          size/L
 
 ### Branch Strategy
 
-- All PRs target `dev`, **never** `main`
-- `main` ← `dev` promotions happen periodically
+- All PRs target `staging`, **never** `main`
+- `main` ← `staging` promotions happen on intentional release
 - Branch protection: require PR + 1 approval + `build` CI check
 - Squash merge only
 
