@@ -1,5 +1,7 @@
 # Neon Branching
 
+> **Note:** This skill describes Neon-hosted database branching. Our current production infrastructure uses self-hosted Postgres 17 on AX162-R. This skill remains relevant if using Neon as a managed database provider. For our self-hosted setup, see the [GitHub Flow](../github-flow/) skill for database strategy.
+
 > Use Neon's copy-on-write branches to give dev and production separate databases with near-zero storage overhead.
 
 ## Problem
