@@ -1,157 +1,137 @@
 # GitHub Flow — PR-First Development
 
-> Open source style: no shared DEV environment. Every PR gets an ephemeral preview URL. Merge to `main` deploys to staging. Manual promote to production.
+> Three environments: ephemeral per-PR previews, persistent staging, and stable production. AI agents work in isolation; only Gatekeeper-approved code reaches staging.
 
 ## Mental Model
-
-This workflow is designed for teams where contributors (human or AI) have no shared local environment — exactly like a major open source project. GitHub, Vercel, and Linear all work this way.
 
 ```
 feature branch
      │
      ▼
 PR opened ──────► Ephemeral Preview
-                  • Unique URL per PR (e.g. feat-login-abc.vercel.app)
-                  • Own isolated DB (created on PR open, deleted on close)
-                  • For: developer review, Gatekeeper testing
+                  • URL: pr-{N}.preview.{domain}
+                  • Isolated Docker container (spun up in CI, torn down on PR close)
+                  • Isolated Postgres DB (empty + migrations run fresh)
+                  • For: Gatekeeper review, tester verification, CI checks
      │
-     ▼ approved + CI pass → squash merge
+     ▼ CI pass + Gatekeeper approves → squash merge
      │
-   main ──────────► Staging (auto-deploy)
-                    • Permanent URL (staging.domain.com)
-                    • Persistent staging DB
-                    • The "nightly build" — accumulated latest work
-                    • For: client preview, integration testing, release decisions
+  staging ──────► staging.{domain}
+                  • Permanent URL (e.g. staging.tryit.fun)
+                  • Persistent staging Postgres DB
+                  • Auto-migrates on every merge
+                  • The "nightly build" — latest integrated work
+                  • For: product owner review, release decisions
      │
-     ▼ "ready to release" → one-click promote
+     ▼ release decision → PR: staging → main
      │
-Production ─────────► domain.com
-                       • Production DB (Neon main branch)
-                       • Stable. Only changes on explicit release.
+  main ──────────► {domain} (production)
+                   • Production Postgres DB
+                   • Migrations apply on release
+                   • Stable — only changes on intentional release
 ```
 
-## Three Environments Explained
+## Three Environments
 
 | | Ephemeral Preview | Staging | Production |
 |--|---|---|---|
-| **Trigger** | PR opened | Merge to `main` | Manual promote |
-| **URL** | Temporary, unique per PR | `staging.domain.com` | `domain.com` |
-| **Lifespan** | Lives as long as PR is open | Always running | Always running |
-| **Database** | Isolated per-PR Neon branch | Neon `staging` branch | Neon `main` branch |
-| **Purpose** | Test this PR in isolation | Integration, client review | Live users |
+| **Trigger** | PR opened | Merge to `staging` | PR: staging → main |
+| **URL** | `pr-{N}.preview.{domain}` | `staging.{domain}` | `{domain}` |
+| **Lifespan** | Lives while PR is open | Always running | Always running |
+| **Database** | Isolated per-PR Postgres (empty + migrations) | Persistent staging Postgres | Persistent production Postgres |
+| **Purpose** | Test this PR in isolation | Integration, release candidate review | Live users |
 
-**Note: DEV has no URL and does not exist as an infrastructure environment.** In open source projects, DEV is only ever local on a contributor's machine. Since AI agents have no local machines, DEV simply doesn't exist.
+**Note: DEV has no URL and does not exist as an infrastructure environment.** AI agents have no local machines — DEV is undefined. Features go straight to ephemeral preview.
 
 ## Database Strategy
 
-### Ephemeral Preview: Per-PR Neon Branch
+### Ephemeral Preview: Per-PR Postgres Database
 
-Each PR gets its own isolated Neon database branch. Schema is copied from `main` (no production data). Destroyed when PR closes.
-
-```yaml
-# .github/workflows/preview-db.yml
-on:
-  pull_request:
-    types: [opened, reopened, synchronize, closed]
-
-jobs:
-  create-preview-db:
-    if: github.event.action != 'closed'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: neondatabase/create-branch-action@v5
-        id: neon
-        with:
-          project_id: ${{ secrets.NEON_PROJECT_ID }}
-          branch_name: preview/pr-${{ github.event.number }}
-          parent: main
-          api_key: ${{ secrets.NEON_API_KEY }}
-      - name: Set DATABASE_URL for this PR's Vercel preview
-        run: |
-          vercel env add DATABASE_URL preview \
-            --value "${{ steps.neon.outputs.db_url_with_pooler }}" \
-            --git-branch "${{ github.head_ref }}" \
-            --token ${{ secrets.VERCEL_TOKEN }}
-
-  teardown-preview-db:
-    if: github.event.action == 'closed'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: neondatabase/delete-branch-action@v3
-        with:
-          project_id: ${{ secrets.NEON_PROJECT_ID }}
-          branch: preview/pr-${{ github.event.number }}
-          api_key: ${{ secrets.NEON_API_KEY }}
-```
-
-### Staging: Persistent Neon Branch
-
-A dedicated `staging` Neon branch. Persistent. Refresh from production snapshot periodically (e.g. weekly) to prevent drift.
-
-### Production: Neon `main` Branch
-
-Never touched by previews or staging. Only updated via Atlas migrations on production deploys.
-
-## Vercel Setup
-
-Two Vercel projects connected to the same repo:
-
-| Project | Branch | Domain | Auto-deploy? |
-|---------|--------|--------|--------------|
-| `myapp-staging` | `main` | `staging.domain.com` | ✅ Yes |
-| `myapp` (production) | manual promote | `domain.com` | ❌ Manual only |
-
-To promote: in Vercel dashboard, click "Promote to Production" on any staging deployment. Or via API:
+Each PR gets its own isolated database. Schema is built from scratch (empty DB + all migrations). No production data — purely for schema and API verification.
 
 ```bash
-vercel promote <deployment-url> --token $VERCEL_TOKEN
+# On PR open: create DB and run migrations
+CREATE DATABASE preview_{repo}_pr_{N};
+# ...run Atlas/Drizzle migrations against it
+
+# On PR close: destroy
+DROP DATABASE preview_{repo}_pr_{N};
 ```
+
+The AX162-R server has sufficient resources to run dozens of concurrent preview DBs.
+
+### Staging: Persistent Postgres Database
+
+A dedicated persistent Postgres database per app on AX162-R. Auto-migrated on every merge to `staging`. Periodically refreshed from a production snapshot to prevent excessive drift.
+
+### Production: Production Postgres Database
+
+Never touched by previews or staging automation. Updated only via intentional Atlas migrations on release deploys.
+
+## Infrastructure
+
+**All environments run on AX162-R (162.55.233.221) via Docker Compose.**
+
+Not Vercel. Not Neon. Self-hosted.
+
+| Layer | Tool |
+|-------|------|
+| Hosting | Docker Compose |
+| Reverse proxy | Traefik (Cloudflare DNS-01 ACME) |
+| Database | Postgres 17 (self-hosted, per-app) |
+| Ephemeral preview orchestration | GitHub Actions → SSH → AX162-R |
 
 ## Branch Strategy
 
-Only `main` exists as a permanent branch. No `dev`, no `staging` branch.
+Two permanent branches:
 
 ```
-main          ← permanent, staging deploys from here
-feature/...   ← short-lived, one per PR, deleted after merge
+main      ← production (never touch directly)
+staging   ← integration point (all PRs target here)
+feature/  ← ephemeral, one per PR, deleted after merge
 ```
 
-Branch protection on `main`:
+Branch protection on both `main` and `staging`:
 - Require PR (no direct push)
 - 1 required approval (Gatekeeper)
 - Required CI check: `build`
 - Squash merge only
 - Auto-delete head branches
 
-## Agent Workflow
+## Release Process
 
-Every agent always branches from `main`:
+Production releases are intentional. When staging has accumulated enough tested changes:
 
 ```bash
-git checkout main && git pull
-git checkout -b feat/issue-123-description
-# implement...
-gh pr create --base main --title "feat: ..." --body "Closes #123"
+# Gatekeeper opens release PR
+gh pr create \
+  --base main \
+  --head staging \
+  --title "release: $(date +%Y-%m-%d)" \
+  --body "Promoting staging to production"
 ```
 
-The Gatekeeper reviews, approves, squash merges. Staging auto-updates. Product owner promotes to production when ready.
+Same approval + CI requirements as any other PR.
 
-## When to Promote to Production
+## Agent Workflow
 
-Production releases are intentional decisions, not automatic. Promote when:
-- Feature set is complete enough for users
-- Client has reviewed and approved on staging (Epiow)
-- No open P0/P1 issues
-- Staging has been stable for a reasonable period
+Every agent always branches from `staging`:
 
-This gives the product owner full control over what users see.
+```bash
+git checkout staging && git pull
+git checkout -b feat/issue-123-description
+# implement...
+gh pr create --base staging --title "feat: ..." --body "Closes #123"
+```
+
+The Gatekeeper reviews the ephemeral preview, approves, squash merges. Staging auto-updates.
 
 ## Gotchas
 
-**Staging DB can drift from production.** If production data evolves (new rows, new patterns), staging schema stays in sync but data differs. This is expected and fine — staging is for schema + feature testing, not data accuracy.
+**Staging DB can drift from production.** If production data evolves and staging diverges in content (though schema stays aligned via migrations), expect differences. This is fine — staging is for schema + feature testing.
 
-**Per-PR DB shares the `main` schema.** All PR previews copy from Neon `main`. If production has a migration that staging doesn't, previews may be out of sync. Run migrations on staging first; previews inherit from `main` by default.
+**Per-PR DBs start empty.** No seed data by default. Apps must handle empty-state gracefully, or a minimal seed script should run in CI. Test the real first-time user experience.
 
-**Don't send external clients to PR preview URLs.** Ephemeral URLs are for internal review (Gatekeeper, team). Clients always review on `staging.domain.com` — it's stable, professional, and doesn't expire.
+**Atlas migrations run in CI before deploy.** Migrations apply to staging on every merge. Per-PR previews run full migration chain from empty.
 
-**Atlas migrations run in CI before deploy.** Migrations apply to staging on every merge to `main`. Per-PR previews get a fresh schema copy — no migration history needed.
+**Don't send external clients to PR preview URLs.** Ephemeral URLs are for internal review. Clients always review on `staging.{domain}` — it's stable, professional, and doesn't expire.
